@@ -10,7 +10,7 @@ from pydantic import BaseModel, root_validator
 DecoratedCallable = TypeVar("DecoratedCallable", bound = Callable[..., Any])
 
 
-class ListeningCallable(BaseModel):
+class RegisteredCallable(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
@@ -34,6 +34,7 @@ class Message(BaseModel):
     data: Any
     reply_to_queue: Optional[str]
     destination_exchange: Optional[str]
+    # TODO headers ttl etc
 
 # class ExchangeType(Enum):
 #     DIRECT = 'direct'

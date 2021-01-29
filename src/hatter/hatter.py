@@ -3,9 +3,9 @@ Defines main object which is used to decorate methods
 """
 import functools
 from functools import partial
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Generator
 
-from hatter.domain import DecoratedCallable, ListeningCallable, Message
+from hatter.domain import DecoratedCallable, RegisteredCallable, Message
 from hatter.util import get_param_names
 
 
@@ -37,7 +37,7 @@ class Hatter:
 
         # we need a registry of functions (to be added via @hatter.listen(...) decorators). Each function in this registry will be set as a callback for its
         # associated queue when calling `run`
-        self._registry: List[ListeningCallable] = list()
+        self._registry: List[RegisteredCallable] = list()
 
     def listen(
             self,
@@ -46,6 +46,9 @@ class Hatter:
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         Registers decorated function to run when a message is pushed from RabbitMQ on the given queue or exchange.
+
+        Function can return a `Message` object (with an exchange etc specified) and that message will be sent to the message broker. Can also decorate a
+        generator (i.e. a function which `yield`s instead of `return`s) and all yielded messages will be sent.
 
         A queue or exchange name can be parameterized by including `{a_var}` within the name string. These will be filled by properties specified
         in hatter.run().
@@ -59,13 +62,24 @@ class Hatter:
         """
 
         def decorator(func: DecoratedCallable) -> DecoratedCallable:
+            # Wrap function to handle a returned Message(s) object
+            @functools.wraps(func)
+            def _func(*args, **kwargs):
+                return_val = func(*args, **kwargs)
+                if isinstance(return_val, Generator):
+                    print('is gen')
+                    for v in return_val:
+                        print('v', v)
+                else:
+                    print('return_val', return_val)
+
             # Register this function for later listening
             self._register_listener(
-                func,
+                _func,
                 queue_name,
                 exchange_name
             )
-            return func
+            return _func
 
         return decorator
 
@@ -79,7 +93,7 @@ class Hatter:
         Adds function to registry
         """
         self._registry.append(
-            ListeningCallable(
+            RegisteredCallable(
                 func = func,
                 queue_name = queue_name,
                 exchange_name = exchange_name
