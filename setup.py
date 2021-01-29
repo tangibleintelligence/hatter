@@ -11,5 +11,9 @@ setup(
     author = "Austin Howard",
     author_email = "austin@tangibleintelligence.com",
     packages = find_packages('src'),
-    package_dir = {'': 'src'}
+    package_dir = {'': 'src'},
+    install_requires = [
+        'AMQPStorm>=2.8.3,<3',
+        'pydantic>=1.7.3,<2'
+    ]
 )
