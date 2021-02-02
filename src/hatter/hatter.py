@@ -5,7 +5,8 @@ import functools
 from functools import partial
 from typing import Callable, List, Optional, Generator
 
-from hatter.domain import DecoratedCallable, RegisteredCallable, Message
+from hatter.amqp import AMQPManager
+from hatter.domain import DecoratedCallable, RegisteredCallable, HatterMessage
 from hatter.util import get_param_names
 
 
@@ -30,10 +31,14 @@ class Hatter:
             rabbitmq_pass: str,
             rabbitmq_virtual_host: str = '/'
     ):
-        self._rabbitmq_host = rabbitmq_host
-        self._rabbitmq_user = rabbitmq_user
-        self._rabbitmq_pass = rabbitmq_pass
-        self._rabbitmq_virtual_host = rabbitmq_virtual_host
+
+        # Init an AMQPManager. Actual connectivity isn't started until __enter__ via a with block.
+        self._amqp_manager: AMQPManager = AMQPManager(
+            rabbitmq_host,
+            rabbitmq_user,
+            rabbitmq_pass,
+            rabbitmq_virtual_host
+        )
 
         # we need a registry of functions (to be added via @hatter.listen(...) decorators). Each function in this registry will be set as a callback for its
         # associated queue when calling `run`
@@ -47,7 +52,7 @@ class Hatter:
         """
         Registers decorated function to run when a message is pushed from RabbitMQ on the given queue or exchange.
 
-        Function can return a `Message` object (with an exchange etc specified) and that message will be sent to the message broker. Can also decorate a
+        Function can return a `HatterMessage` object (with an exchange etc specified) and that message will be sent to the message broker. Can also decorate a
         generator (i.e. a function which `yield`s instead of `return`s) and all yielded messages will be sent.
 
         A queue or exchange name can be parameterized by including `{a_var}` within the name string. These will be filled by properties specified
@@ -100,6 +105,7 @@ class Hatter:
             )
         )
 
+    # TODO also need __enter__ and __exit__ paradigms if something like FastAPI will manage lifecycle?
     def run(self, **kwargs):
         """
         Begins listening on all registered queues.
@@ -110,14 +116,14 @@ class Hatter:
             print(lc)
 
             # Exactly one of the arguments should be type hinted as a Message type.
-            message_arg_names = [k for k, v in lc.func.__annotations__.items() if v is Message]
+            message_arg_names = [k for k, v in lc.func.__annotations__.items() if v is HatterMessage]
             if len(message_arg_names) == 0:
                 raise ValueError("An argument of the decorated function must be type hinted as a Message")
             if len(message_arg_names) > 1:
                 raise ValueError("Only one argument of the decorated function must be type hinted as a Message")
 
             partial_kwargs = dict()
-            partial_kwargs[message_arg_names[0]] = Message(data = 'ab')
+            partial_kwargs[message_arg_names[0]] = HatterMessage(data = 'ab')
 
             # Check for params in the queue/exchange name
             for param_name in get_param_names(lc.queue_name or lc.exchange_name):

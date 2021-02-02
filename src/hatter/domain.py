@@ -30,7 +30,7 @@ class RegisteredCallable(BaseModel):
         return values
 
 
-class Message(BaseModel):
+class HatterMessage(BaseModel):
     data: Any
     reply_to_queue: Optional[str]
     destination_exchange: Optional[str]
