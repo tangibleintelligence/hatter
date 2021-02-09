@@ -1,0 +1,22 @@
+---
+kind: pipeline
+name: build/upload pypi package
+steps:
+  - name:  build wheel
+    image: python:3.8
+    commands:
+      - pip install -e .
+      - pip install wheel
+      - python setup.py bdist_wheel
+  - name: upload to pypi
+    when:
+      branch:
+        - master
+    image: python:3.8
+    environment:
+      TWINE_USERNAME:       __token__
+      TWINE_PASSWORD:
+        from_secret: pypi_token
+    commands:
+      - pip install twine
+      - twine upload dist/*
