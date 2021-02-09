@@ -4,7 +4,7 @@ Defines main object which is used to decorate methods
 import asyncio
 import inspect
 from logging import getLogger
-from typing import Callable, AsyncGenerator, List, Optional, Set, Dict, NewType, Type, Any, Union
+from typing import Callable, AsyncGenerator, List, Optional, Set, Dict, NewType, Type, Any, Union, Coroutine
 
 from aio_pika import IncomingMessage, Channel
 
@@ -75,8 +75,13 @@ class Hatter:
 
         def decorator(coro_or_gen: DecoratedCoroOrGen) -> DecoratedCoroOrGen:
             # Register this coroutine/async-generator for later listening
-            self._register_listener(coro_or_gen, queue_name, exchange_name)
-            return coro_or_gen
+            if asyncio.iscoroutinefunction(coro_or_gen):
+                self._register_listener(coro_or_gen, queue_name, exchange_name)
+                return coro_or_gen
+            else:
+                raise ValueError(
+                    f"Cannot decorate `{coro_or_gen.__name__}` (type `{type(coro_or_gen).__name__}`). Must be coroutine (`async def`) or async-generator (`async def` that `yield`s)."
+                )
 
         return decorator
 
@@ -144,32 +149,30 @@ class Hatter:
         # Create exchange and/or queue
         exchange, queue = await create_exchange_queue(ex_name, q_name, consume_channel)
 
-        # Form a closure to register on this queue.
-        async def consumption_callback(message: IncomingMessage):
-            # Build kwargs from fixed...
-            callable_kwargs = dict()
-            callable_kwargs.update(fixed_callable_kwargs)
+        # Consume from this queue, forever
+        async with queue.iterator() as queue_iter:
+            message: IncomingMessage
+            async for message in queue_iter:
+                # Build kwargs from fixed...
+                callable_kwargs = dict()
+                callable_kwargs.update(fixed_callable_kwargs)
 
-            # ... and dynamic (i.e. based on the message)
-            for kwarg, kwarg_function in dynamic_callable_kwargs.items():
-                callable_kwargs[kwarg] = kwarg_function(message)
+                # ... and dynamic (i.e. based on the message)
+                for kwarg, kwarg_function in dynamic_callable_kwargs.items():
+                    callable_kwargs[kwarg] = kwarg_function(message)
 
-            # We call the registered coroutine/generator with these built kwargs
-            try:
-                # noinspection PyCallingNonCallable
-                return_val = await registered_obj.coro_or_gen(**callable_kwargs)
-                await self._handle_coro_or_gen_return(return_val)
+                # We call the registered coroutine/generator with these built kwargs
+                try:
+                    return_val = await registered_obj.coro_or_gen(**callable_kwargs)
+                    await self._handle_coro_or_gen_return(return_val)
 
-                # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
-                # TODO consider doing all of this transactionally
-                message.ack()
-            except Exception as e:
-                # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
-                message.nack(requeue=False)
-                raise e
-
-        # Start consuming the above closure
-        await queue.consume(consumption_callback, exclusive=queue.exclusive)
+                    # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
+                    # TODO consider doing all of this transactionally
+                    message.ack()
+                except Exception as e:
+                    # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
+                    message.nack(requeue=False)
+                    raise e
 
     @staticmethod
     async def build_exchange_queue_names(registered_obj, run_kwargs):
@@ -222,7 +225,9 @@ class Hatter:
                 else:
                     raise ValueError(f"Only HatterMessage objects may be yielded, not {type(v)}")
         else:
-            if return_val is not None and isinstance(return_val, HatterMessage):
+            if return_val is None:
+                return
+            if isinstance(return_val, HatterMessage):
                 logger.debug(f"Publishing {return_val}")
                 await publish_hatter_message(return_val, self._amqp_manager.publish_channel)
             else:

@@ -1,18 +1,20 @@
 """
 Data objects
 """
-from typing import Any, TypeVar, Optional, Coroutine, Union, AsyncGenerator
+from typing import Any, TypeVar, Optional, Coroutine, Union, AsyncGenerator, Callable
 
 from pydantic import BaseModel, root_validator
 
-DecoratedCoroOrGen = TypeVar("DecoratedCoroOrGen", bound=Union[Coroutine[..., Any], AsyncGenerator[Any, ...]])
+DecoratedCoro = TypeVar("DecoratedCoro", bound=Coroutine[None, None, Any])
+DecoratedGen = TypeVar("DecoratedGen", bound=AsyncGenerator[Any, None])
+DecoratedCoroOrGen = Union[DecoratedCoro, DecoratedGen]
 
 
 class RegisteredCoroOrGen(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    coro_or_gen: DecoratedCoroOrGen
+    coro_or_gen: Union[DecoratedCoroOrGen, Callable]
     queue_name: Optional[str]
     exchange_name: Optional[str]
 
