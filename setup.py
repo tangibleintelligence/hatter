@@ -12,8 +12,9 @@ setup(
     author_email = "austin@tangibleintelligence.com",
     packages = find_packages('src'),
     package_dir = {'': 'src'},
+    python_requires='>3.6.1',
     install_requires = [
-        'AMQPStorm>=2.8.3,<3',
+        'aio-pika>=6.7,<7',
         'pydantic>=1.7.3,<2'
     ]
 )
