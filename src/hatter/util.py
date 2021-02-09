@@ -4,30 +4,12 @@ Helpful stateless utility methods
 import re
 from typing import Set, Optional, Tuple
 
-from aio_pika import Channel, Message, DeliveryMode, Exchange, Queue, ExchangeType
-
-from hatter.domain import HatterMessage
+from aio_pika import Channel, Exchange, Queue, ExchangeType
 
 
 def get_substitution_names(a_str: str) -> Set[str]:
     """Finds all strings wrapped in {braces} which we expect should/could be substituted in an f-string/`format` call."""
     return set(re.findall("{(.*?)}", a_str))
-
-
-async def publish_hatter_message(msg: HatterMessage, channel: Channel):
-    """Intelligently publishes the given message on the given channel"""
-    amqp_message = Message(body=msg.data, reply_to=msg.reply_to_queue)  # TODO other fields like ttl
-
-    # Exchange or queue based?
-    if msg.destination_exchange is not None:
-        # Exchange based it is
-        exchange = await channel.get_exchange(msg.destination_exchange)
-        routing_key = msg.routing_key or ""
-        await exchange.publish(amqp_message, routing_key=routing_key, mandatory=True)  # TODO might need to disable mandatory sometimes?
-    else:
-        # Queue based
-        exchange = await channel.get_exchange("")
-        await exchange.publish(amqp_message, routing_key=msg.destination_queue, mandatory=True)
 
 
 async def create_exchange_queue(

@@ -4,13 +4,13 @@ Defines main object which is used to decorate methods
 import asyncio
 import inspect
 from logging import getLogger
-from typing import Callable, AsyncGenerator, List, Optional, Set, Dict, NewType, Type, Any, Union, Coroutine
+from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union
 
-from aio_pika import IncomingMessage, Channel
+from aio_pika import IncomingMessage, Channel, Message
 
 from hatter.amqp import AMQPManager
 from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
-from hatter.util import get_substitution_names, publish_hatter_message, create_exchange_queue
+from hatter.util import get_substitution_names, create_exchange_queue
 
 logger = getLogger(__name__)
 
@@ -43,7 +43,7 @@ class Hatter:
 
         # We also need a registry of serializers/deserializers which can be used to convert raw AMQP messages to a known python type, and
         # vice versa
-        # noinspection PyPep8Naming
+        # TODO also maybe some default ones? like str <-> bytes, json for pydantic, etc.?
         self._serializers: Dict[Type[T], Callable[[T], bytes]] = dict()
         self._deserializers: Dict[Type[T], Callable[[bytes], T]] = dict()
 
@@ -75,7 +75,7 @@ class Hatter:
 
         def decorator(coro_or_gen: DecoratedCoroOrGen) -> DecoratedCoroOrGen:
             # Register this coroutine/async-generator for later listening
-            if asyncio.iscoroutinefunction(coro_or_gen):
+            if inspect.iscoroutinefunction(coro_or_gen) or inspect.isasyncgenfunction(coro_or_gen):
                 self._register_listener(coro_or_gen, queue_name, exchange_name)
                 return coro_or_gen
             else:
@@ -162,16 +162,32 @@ class Hatter:
 
             # We call the registered coroutine/generator with these built kwargs
             try:
-                return_val = await registered_obj.coro_or_gen(**callable_kwargs)
-                await self._handle_coro_or_gen_return(return_val)
-
+                if inspect.iscoroutinefunction(registered_obj.coro_or_gen):
+                    # it returns
+                    return_val = await registered_obj.coro_or_gen(**callable_kwargs)
+                    if return_val is not None:
+                        if isinstance(return_val, HatterMessage):
+                            logger.debug(f"Publishing {return_val}")
+                            await self._publish_hatter_message(return_val, self._amqp_manager.publish_channel)
+                        else:
+                            raise ValueError(f"Only HatterMessage objects may be returned, not {type(return_val)}")
+                else:
+                    # it yields
+                    async for v in registered_obj.coro_or_gen(**callable_kwargs):
+                        if v is None:
+                            continue
+                        if isinstance(v, HatterMessage):
+                            logger.debug(f"Publishing {v}")
+                            await self._publish_hatter_message(v, self._amqp_manager.publish_channel)
+                        else:
+                            raise ValueError(f"Only HatterMessage objects may be yielded, not {type(v)}")
                 # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
                 # TODO consider doing all of this transactionally
                 message.ack()
-            except Exception as e:
+            except Exception:
                 # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
                 message.nack(requeue=False)
-                raise e
+                logger.exception("Exception on message")
 
     @staticmethod
     async def build_exchange_queue_names(registered_obj, run_kwargs):
@@ -207,27 +223,21 @@ class Hatter:
 
         return ex_name, q_name, resolved_substitutions
 
-    async def _handle_coro_or_gen_return(self, return_val):
-        """
-        Handles the output of a decorated function. Basically, a decorated function can return/yield HatterMessage object(s),
-        and we need to route those back to the broker.
-        """
-        # Since we support decorating generators too (i.e. "functions" that yield instead of return), need to check if this
-        # is a generator, and if so exhaust the generator
-        if isinstance(return_val, AsyncGenerator):
-            async for v in return_val:
-                if v is None:
-                    continue
-                if isinstance(v, HatterMessage):
-                    logger.debug(f"Publishing {v}")
-                    await publish_hatter_message(v, self._amqp_manager.publish_channel)
-                else:
-                    raise ValueError(f"Only HatterMessage objects may be yielded, not {type(v)}")
+    async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel):
+        """Intelligently publishes the given message on the given channel"""
+        # try to serialize message body
+        serializer = self._serializers.get(type(msg.data), None)
+        if serializer is None:
+            raise ValueError(f"No registered serializer compatible with {type(msg.data)}")
+
+        amqp_message = Message(body=serializer(msg.data), reply_to=msg.reply_to_queue)  # TODO other fields like ttl
+
+        # Exchange or queue based?
+        if msg.destination_exchange is not None:
+            # Exchange based it is
+            exchange = await channel.get_exchange(msg.destination_exchange)
+            routing_key = msg.routing_key or ""
+            await exchange.publish(amqp_message, routing_key=routing_key, mandatory=True)  # TODO might need to disable mandatory sometimes?
         else:
-            if return_val is None:
-                return
-            if isinstance(return_val, HatterMessage):
-                logger.debug(f"Publishing {return_val}")
-                await publish_hatter_message(return_val, self._amqp_manager.publish_channel)
-            else:
-                raise ValueError(f"Only HatterMessage objects may be returned, not {type(return_val)}")
+            # Queue based
+            await channel.default_exchange.publish(amqp_message, routing_key=msg.destination_queue, mandatory=True)

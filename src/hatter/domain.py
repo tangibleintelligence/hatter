@@ -59,3 +59,5 @@ class HatterMessage(BaseModel):
             raise ValueError(
                 "Routing key doesn't make sense with only a queue name. Perhaps you meant to pass an exchange and routing key?"
             )
+
+        return values
