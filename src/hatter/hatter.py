@@ -52,7 +52,7 @@ class Hatter:
         self._deserializers[typ] = deserializer
 
     def listen(
-        self, queue_name: Optional[str] = None, exchange_name: Optional[str] = None
+        self, *, queue_name: Optional[str] = None, exchange_name: Optional[str] = None
     ) -> Callable[[Union[DecoratedCoroOrGen]], DecoratedCoroOrGen]:
         """
         Registers decorated coroutine (`async def`) or async generator (`async def` with `yield` instead of return) to run when a message is
@@ -150,29 +150,28 @@ class Hatter:
         exchange, queue = await create_exchange_queue(ex_name, q_name, consume_channel)
 
         # Consume from this queue, forever
-        async with queue.iterator() as queue_iter:
+        async for message in queue:
             message: IncomingMessage
-            async for message in queue_iter:
-                # Build kwargs from fixed...
-                callable_kwargs = dict()
-                callable_kwargs.update(fixed_callable_kwargs)
+            # Build kwargs from fixed...
+            callable_kwargs = dict()
+            callable_kwargs.update(fixed_callable_kwargs)
 
-                # ... and dynamic (i.e. based on the message)
-                for kwarg, kwarg_function in dynamic_callable_kwargs.items():
-                    callable_kwargs[kwarg] = kwarg_function(message)
+            # ... and dynamic (i.e. based on the message)
+            for kwarg, kwarg_function in dynamic_callable_kwargs.items():
+                callable_kwargs[kwarg] = kwarg_function(message)
 
-                # We call the registered coroutine/generator with these built kwargs
-                try:
-                    return_val = await registered_obj.coro_or_gen(**callable_kwargs)
-                    await self._handle_coro_or_gen_return(return_val)
+            # We call the registered coroutine/generator with these built kwargs
+            try:
+                return_val = await registered_obj.coro_or_gen(**callable_kwargs)
+                await self._handle_coro_or_gen_return(return_val)
 
-                    # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
-                    # TODO consider doing all of this transactionally
-                    message.ack()
-                except Exception as e:
-                    # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
-                    message.nack(requeue=False)
-                    raise e
+                # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
+                # TODO consider doing all of this transactionally
+                message.ack()
+            except Exception as e:
+                # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
+                message.nack(requeue=False)
+                raise e
 
     @staticmethod
     async def build_exchange_queue_names(registered_obj, run_kwargs):
