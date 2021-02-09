@@ -8,6 +8,7 @@ setup(
     version = "0.0.2",
     description = "Framework to easily create microservices backed by a RabbitMQ broker",
     long_description = LONG_DESCRIPTION,
+    long_description_content_type='text/markdown',
     author = "Austin Howard",
     author_email = "austin@tangibleintelligence.com",
     packages = find_packages('src'),
