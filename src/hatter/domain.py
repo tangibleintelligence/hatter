@@ -41,11 +41,19 @@ class HatterMessage(BaseModel):
         """To properly route, we must either have an exchange or a queue name...and not both."""
         destination_queue = values["destination_queue"]
         destination_exchange = values["destination_exchange"]
+        routing_key = values["routing_key"]
 
         if destination_queue is None and destination_exchange is None:
             raise ValueError("Either destination_exchange or destination_queue must be provided.")
 
         if destination_queue is not None and destination_exchange is not None:
             raise ValueError(
-                "Only one of destination_exchange or destination_queue may be provided. Perhaps you meant to pass an exchange and routing key?"
+                "Only one of destination_exchange or destination_queue may be provided. Perhaps you meant to pass an exchange and routing "
+                "key?"
+            )
+
+        # If we only have a queue name, and also a routing_key, that doesn't make sense either
+        if destination_exchange is None and routing_key is not None:
+            raise ValueError(
+                "Routing key doesn't make sense with only a queue name. Perhaps you meant to pass an exchange and routing key?"
             )
