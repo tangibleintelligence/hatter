@@ -3,10 +3,11 @@ Defines main object which is used to decorate methods
 """
 import asyncio
 import inspect
+import uuid
 from logging import getLogger
 from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union
 
-from aio_pika import IncomingMessage, Channel, Message
+from aio_pika import IncomingMessage, Channel, Message, Queue
 
 from hatter.amqp import AMQPManager
 from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
@@ -47,6 +48,10 @@ class Hatter:
         self._serializers: Dict[Type[T], Callable[[T], bytes]] = dict()
         self._deserializers: Dict[Type[T], Callable[[bytes], T]] = dict()
 
+        # Will get replaced/modified at runtime
+        self._run_kwargs = dict()
+        self._tasks: List[asyncio.Task] = list()
+
     def register_serde(self, typ: Type[T], serializer: Callable[[T], bytes], deserializer: Callable[[bytes], T]):
         self._serializers[typ] = serializer
         self._deserializers[typ] = deserializer
@@ -80,7 +85,8 @@ class Hatter:
                 return coro_or_gen
             else:
                 raise ValueError(
-                    f"Cannot decorate `{coro_or_gen.__name__}` (type `{type(coro_or_gen).__name__}`). Must be coroutine (`async def`) or async-generator (`async def` that `yield`s)."
+                    f"Cannot decorate `{coro_or_gen.__name__}` (type `{type(coro_or_gen).__name__}`). Must be coroutine (`async def`) or "
+                    f"async-generator (`async def` that `yield`s)."
                 )
 
         return decorator
@@ -91,18 +97,56 @@ class Hatter:
         """
         self._registry.append(RegisteredCoroOrGen(coro_or_gen=coro_or_gen, queue_name=queue_name, exchange_name=exchange_name))
 
+    def __call__(self, **kwargs):
+        """
+        Registers the given kwargs as runtime kwargs, to be substituted when listening.
+
+        Anticipated to be used in conjunction with a  `with` block, listening on the registered coroutines, using the given runtime kwargs.
+        Usage example:
+
+            async with hatter(kwarg1="val1"):
+                # `with` is not blocking...anything can be done here
+        """
+        # TODO also get params from env variables, not just kwargs
+        self._run_kwargs = kwargs
+        return self
+
+    async def __aenter__(self):
+        """
+        Connects to RabbitMQ and starts listening on registered queues/coroutines. Does not block. If blocking method is desired, either
+        perform a subsequent blocking call within the `async with` block, or use the shorthand `.run(**kwargs)` method.
+        """
+        await self._amqp_manager.__aenter__()
+        # TODO experiment with one channel per consumption
+        consume_channel = await self._amqp_manager.new_channel()
+
+        for registered_obj in self._registry:
+            self._tasks.append(asyncio.create_task(self.consume_coro_or_gen(registered_obj, consume_channel, self._run_kwargs)))
+
+        # TODO need a way to monitor for any of these tasks failing and either restart them or abort everything
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        for task in self._tasks:
+            task.cancel()
+        await self._amqp_manager.__aexit__(exc_type, exc_val, exc_tb)
+
+    async def wait(self):
+        """
+        Can be used to wait on all running listeners. Will return when any waiting listener has an error
+        """
+        completed_tasks, _ = await asyncio.wait(self._tasks, return_when=asyncio.FIRST_EXCEPTION)
+
+        # TODO need to check completed_tasks in case one threw an error
+
     # TODO also need __aenter__ and __aexit__ paradigms if something like FastAPI will manage lifecycle?
     async def run(self, **kwargs):
         """
-        Begins listening on all registered queues.
-
-        TODO also get params from env variables, not just kwargs
+        Shorthand coroutine which connects, starts listening on all registered coroutines, and blocks while listening. This can be used as
+        the "entrypoint" to a hatter-backed microservice.
         """
-        async with self._amqp_manager as mgr:
-            # TODO experiment with one channel per consumption
-            consume_channel = await mgr.new_channel()
-
-            await asyncio.gather(*[self.consume_coro_or_gen(registered_obj, consume_channel, kwargs) for registered_obj in self._registry])
+        async with self(**kwargs):
+            logger.info("Hatter connected and listening...")
+            await self.wait()
 
     async def consume_coro_or_gen(self, registered_obj: RegisteredCoroOrGen, consume_channel: Channel, run_kwargs: Dict[str, Any]):
         """
@@ -168,7 +212,7 @@ class Hatter:
                     if return_val is not None:
                         if isinstance(return_val, HatterMessage):
                             logger.debug(f"Publishing {return_val}")
-                            await self._publish_hatter_message(return_val, self._amqp_manager.publish_channel)
+                            await self.publish(return_val)
                         else:
                             raise ValueError(f"Only HatterMessage objects may be returned, not {type(return_val)}")
                 else:
@@ -178,12 +222,17 @@ class Hatter:
                             continue
                         if isinstance(v, HatterMessage):
                             logger.debug(f"Publishing {v}")
-                            await self._publish_hatter_message(v, self._amqp_manager.publish_channel)
+                            await self.publish(v)
                         else:
                             raise ValueError(f"Only HatterMessage objects may be yielded, not {type(v)}")
                 # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
                 # TODO consider doing all of this transactionally
                 message.ack()
+            except asyncio.CancelledError:
+                # We were told to cancel. nack with requeue so someone else will pick up the work
+                message.nack(requeue=True)
+                logger.info("Cancellation requested.")
+                raise
             except Exception:
                 # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
                 message.nack(requeue=False)
@@ -223,14 +272,39 @@ class Hatter:
 
         return ex_name, q_name, resolved_substitutions
 
-    async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel):
+    async def publish(self, msg: HatterMessage, correlation_id_needed: bool = False) -> str:
+        """
+        Publishes the given message. Can be used for ad-hoc publishing of messages in a `@hatter.listen` decorated method, or by a
+        publish-only application (such as a client in an RPC application). If publishing a message at the end of a listening method, you
+        can just return or yield the `HatterMessage` object and it will be published automatically.
+
+        If desired, returns a generated correlation ID which can be used when tracking responses (e.g. in an RPC application)
+
+        All optional keyword arguments are defined in the same way as RabbitMQ.
+        """
+        if correlation_id_needed:
+            correlation_id = str(uuid.uuid4())
+        else:
+            correlation_id = None
+        await self._publish_hatter_message(msg, self._amqp_manager.publish_channel, correlation_id)
+        return correlation_id
+
+    async def create_temporary_queue(self) -> Queue:
+        """
+        Creates a temporary (transient) queue. Useful for, for example, RPC callbacks
+        """
+        _, queue = await create_exchange_queue(None, None, await self._amqp_manager.new_channel())
+        return queue
+
+    async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel, correlation_id: str):
         """Intelligently publishes the given message on the given channel"""
         # try to serialize message body
         serializer = self._serializers.get(type(msg.data), None)
         if serializer is None:
             raise ValueError(f"No registered serializer compatible with {type(msg.data)}")
 
-        amqp_message = Message(body=serializer(msg.data), reply_to=msg.reply_to_queue)  # TODO other fields like ttl
+        amqp_message = Message(body=serializer(msg.data), reply_to=msg.reply_to_queue, correlation_id=correlation_id)
+        # TODO other fields like ttl
 
         # Exchange or queue based?
         if msg.destination_exchange is not None:
