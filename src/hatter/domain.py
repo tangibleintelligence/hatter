@@ -2,8 +2,9 @@
 Data objects
 """
 from typing import Any, TypeVar, Optional, Coroutine, Union, AsyncGenerator, Callable
+from uuid import uuid4
 
-from pydantic import BaseModel, root_validator
+from pydantic import BaseModel, root_validator, validator
 
 DecoratedCoro = TypeVar("DecoratedCoro", bound=Coroutine[None, None, Any])
 DecoratedGen = TypeVar("DecoratedGen", bound=AsyncGenerator[Any, None])
@@ -33,10 +34,18 @@ class RegisteredCoroOrGen(BaseModel):
 class HatterMessage(BaseModel):
     data: Any
     reply_to_queue: Optional[str]
+    correlation_id: Optional[str]
     destination_exchange: Optional[str]
     destination_queue: Optional[str]
     routing_key: Optional[str]
     # TODO headers ttl etc
+
+    @validator("correlation_id", always=True)
+    def generate_correlation_id(cls, v):
+        if v is None:
+            return str(uuid4())
+        else:
+            return v
 
     @root_validator
     def routable(cls, values):

@@ -3,7 +3,7 @@ Defines main object which is used to decorate methods
 """
 import asyncio
 import inspect
-import uuid
+import pickle
 from logging import getLogger
 from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union
 
@@ -53,8 +53,29 @@ class Hatter:
         self._tasks: List[asyncio.Task] = list()
 
     def register_serde(self, typ: Type[T], serializer: Callable[[T], bytes], deserializer: Callable[[bytes], T]):
-        self._serializers[typ] = serializer
-        self._deserializers[typ] = deserializer
+        # we want to enhance the serde slightly to also record the type itself (needed for generic/unknown deserialization)
+        def _serializer(x: T) -> bytes:
+            obj_bytes = serializer(x)
+            return pickle.dumps((obj_bytes, typ))
+
+        def _deserializer(b: bytes) -> T:
+            obj_bytes, _ = pickle.loads(b)
+            return deserializer(obj_bytes)
+
+        self._serializers[typ] = _serializer
+        self._deserializers[typ] = _deserializer
+
+    def generic_deserialize(self, raw_message_bytes: bytes) -> T:
+        """
+        If we don't have a "target" type (i.e. we aren't using hatter to decorate an annotated function) then we need to deserialize
+        "generically" based on the type given.
+        """
+        obj_bytes: bytes
+        typ: Type[T]
+
+        _, typ = pickle.loads(raw_message_bytes)
+        if typ in self._deserializers:
+            return self._deserializers[typ](raw_message_bytes)
 
     def listen(
         self, *, queue_name: Optional[str] = None, exchange_name: Optional[str] = None
@@ -162,6 +183,7 @@ class Hatter:
         # - A single kwarg which isn't one of these params, but which we can serialize/deserialize. This is assumed to be the message body
         # - A few specific other kwargs:
         #   - reply_to: str
+        #   - correlation_id: str
         #   TODO any more?
         fixed_callable_kwargs: Dict[str, Any] = dict()
         dynamic_callable_kwargs: Dict[str, Callable[[IncomingMessage], Any]] = dict()
@@ -179,6 +201,8 @@ class Hatter:
             # If not, is it a special kwarg?
             elif param.name == "reply_to":
                 dynamic_callable_kwargs[param.name] = lambda msg: msg.reply_to
+            elif param.name == "correlation_id":
+                dynamic_callable_kwargs[param.name] = lambda msg: msg.correlation_id
             # If not, is it something we have a serde for?
             elif param.annotation in self._deserializers.keys():
                 # We can only do this for one very special argument
@@ -189,6 +213,7 @@ class Hatter:
                     raise ValueError(
                         f"{param.name} cannot be used for the message body; {message_arg_name} has already been allocated to this role."
                     )
+            # TODO error out?
 
         # Create exchange and/or queue
         exchange, queue = await create_exchange_queue(ex_name, q_name, consume_channel)
@@ -272,22 +297,18 @@ class Hatter:
 
         return ex_name, q_name, resolved_substitutions
 
-    async def publish(self, msg: HatterMessage, correlation_id_needed: bool = False) -> str:
+    async def publish(self, msg: HatterMessage) -> Optional[str]:
         """
         Publishes the given message. Can be used for ad-hoc publishing of messages in a `@hatter.listen` decorated method, or by a
         publish-only application (such as a client in an RPC application). If publishing a message at the end of a listening method, you
         can just return or yield the `HatterMessage` object and it will be published automatically.
 
-        If desired, returns a generated correlation ID which can be used when tracking responses (e.g. in an RPC application)
+        Returns the message's correlation ID which can be used when tracking responses (e.g. in an RPC application)
 
         All optional keyword arguments are defined in the same way as RabbitMQ.
         """
-        if correlation_id_needed:
-            correlation_id = str(uuid.uuid4())
-        else:
-            correlation_id = None
-        await self._publish_hatter_message(msg, self._amqp_manager.publish_channel, correlation_id)
-        return correlation_id
+        await self._publish_hatter_message(msg, self._amqp_manager.publish_channel)
+        return msg.correlation_id
 
     async def create_temporary_queue(self) -> Queue:
         """
@@ -296,14 +317,14 @@ class Hatter:
         _, queue = await create_exchange_queue(None, None, await self._amqp_manager.new_channel())
         return queue
 
-    async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel, correlation_id: str):
+    async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel):
         """Intelligently publishes the given message on the given channel"""
         # try to serialize message body
         serializer = self._serializers.get(type(msg.data), None)
         if serializer is None:
             raise ValueError(f"No registered serializer compatible with {type(msg.data)}")
 
-        amqp_message = Message(body=serializer(msg.data), reply_to=msg.reply_to_queue, correlation_id=correlation_id)
+        amqp_message = Message(body=serializer(msg.data), reply_to=msg.reply_to_queue, correlation_id=msg.correlation_id)
         # TODO other fields like ttl
 
         # Exchange or queue based?
