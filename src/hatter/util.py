@@ -2,6 +2,7 @@
 Helpful stateless utility methods
 """
 import re
+import warnings
 from typing import Set, Optional, Tuple
 
 from aio_pika import Channel, Exchange, Queue, ExchangeType
@@ -38,3 +39,19 @@ async def create_exchange_queue(
         await queue.bind(exchange)  # TODO include headers functionality
 
     return exchange, queue
+
+
+def flexible_is_subclass(cls: type, potential_superclass: type) -> bool:
+    """
+    Checks if `cls` is a subclass of `potential_superclass`, but compares on __qualname__ if `__main__` is in one of the class names.
+    """
+    if issubclass(cls, potential_superclass):
+        return True
+
+    if (cls.__module__ == "__main__") ^ (potential_superclass.__module__ == "__main__"):
+        # Check on qualname
+        if cls.__qualname__ == potential_superclass.__qualname__:
+            warnings.warn(f"Equating classes {cls} and {potential_superclass} on qualified name only.")
+            return True
+
+    return False

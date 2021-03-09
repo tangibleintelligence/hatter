@@ -5,17 +5,99 @@ import asyncio
 import inspect
 import pickle
 from logging import getLogger
-from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union
+from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple
 
 from aio_pika import IncomingMessage, Channel, Message, Queue
 
 from hatter.amqp import AMQPManager
 from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
-from hatter.util import get_substitution_names, create_exchange_queue
+from hatter.util import get_substitution_names, create_exchange_queue, flexible_is_subclass
 
 logger = getLogger(__name__)
 
 T = NewType("T", object)
+
+
+class _Serde:
+    """A serializer/deserializer pair"""
+
+    def __init__(self, obj_serializer: Callable[[T], bytes], obj_deserializer: Callable[[bytes], T]):
+        self._obj_serializer = obj_serializer
+        self._obj_deserializer = obj_deserializer
+
+    # we want to enhance the serde slightly to also record the type itself (needed for generic/unknown deserialization)
+    def serialize(self, obj: T) -> bytes:
+        obj_bytes = self._obj_serializer(obj)
+        return pickle.dumps((obj_bytes, type(obj)))
+
+    def deserialize(self, bites: bytes, expected_type: Optional[Type[T]] = None) -> T:
+        obj_bytes, typ = self.deserialize_raw(bites)
+        if expected_type is not None:
+            if not flexible_is_subclass(typ, expected_type):
+                raise ValueError(f"Unexpected object after deserialization: expected {expected_type}, provided {typ}")
+
+        return self._obj_deserializer(obj_bytes)
+
+    @staticmethod
+    def deserialize_raw(raw_bytes: bytes) -> Tuple[bytes, Type[T]]:
+        obj_bytes, typ = pickle.loads(raw_bytes)
+        return obj_bytes, typ
+
+
+class SerdeRegistry:
+    """
+    Stores serializers and deserializers. Can be interacted with similarly to a dict, but is more intelligent about key selection and
+    matching.
+    """
+
+    # Default: try with pickle
+    # TODO some other default ones? like str <-> bytes, json for pydantic, etc.?
+    _default_serde = _Serde(pickle.dumps, pickle.loads)
+
+    def __init__(self):
+        self._serdes: Dict[Type[T], _Serde] = dict()
+
+    def __contains__(self, item):
+        return self._closest_registered_type(item) is not None
+
+    def __getitem__(self, item):
+        closest_type = self._closest_registered_type(item)
+        if closest_type is None:
+            return SerdeRegistry._default_serde
+        else:
+            return self._serdes[closest_type]
+
+    def register_serde(self, typ: Type[T], obj_serializer: Callable[[T], bytes], obj_deserializer: Callable[[bytes], T]):
+        _serde = _Serde(obj_serializer, obj_deserializer)
+        self._serdes[typ] = _serde
+
+    def generic_deserialize(self, raw_bytes: bytes) -> T:
+        """
+        Deserializes without knowledge of the type. Not as reliable as finding a specific serde, as type checking is impossible.
+        """
+        # Figure out the type first
+        _, typ = _Serde.deserialize_raw(raw_bytes)
+
+        # And now deserialize
+        return self[typ].deserialize(raw_bytes)
+
+    def _closest_registered_type(self, search_type: Type[T]) -> Optional[Type[T]]:
+        """
+        Find the "best" matching serde type we have registered. This should be the type itself, or the closest superclass to the provided
+        type.
+
+        TODO be smarter about a real hierarchy.
+        """
+        # in the dict directly?
+        if search_type in self._serdes:
+            return search_type
+
+        # what about anything that's a superclass?
+        for potential_type in self._serdes.keys():
+            if flexible_is_subclass(search_type, potential_type):
+                return potential_type
+
+        return None
 
 
 class Hatter:
@@ -44,38 +126,21 @@ class Hatter:
 
         # We also need a registry of serializers/deserializers which can be used to convert raw AMQP messages to a known python type, and
         # vice versa
-        # TODO also maybe some default ones? like str <-> bytes, json for pydantic, etc.?
-        self._serializers: Dict[Type[T], Callable[[T], bytes]] = dict()
-        self._deserializers: Dict[Type[T], Callable[[bytes], T]] = dict()
+        self._serde_registry = SerdeRegistry()
 
         # Will get replaced/modified at runtime
         self._run_kwargs = dict()
         self._tasks: List[asyncio.Task] = list()
 
     def register_serde(self, typ: Type[T], serializer: Callable[[T], bytes], deserializer: Callable[[bytes], T]):
-        # we want to enhance the serde slightly to also record the type itself (needed for generic/unknown deserialization)
-        def _serializer(x: T) -> bytes:
-            obj_bytes = serializer(x)
-            return pickle.dumps((obj_bytes, typ))
-
-        def _deserializer(b: bytes) -> T:
-            obj_bytes, _ = pickle.loads(b)
-            return deserializer(obj_bytes)
-
-        self._serializers[typ] = _serializer
-        self._deserializers[typ] = _deserializer
+        self._serde_registry.register_serde(typ, serializer, deserializer)
 
     def generic_deserialize(self, raw_message_bytes: bytes) -> T:
         """
         If we don't have a "target" type (i.e. we aren't using hatter to decorate an annotated function) then we need to deserialize
         "generically" based on the type given.
         """
-        obj_bytes: bytes
-        typ: Type[T]
-
-        _, typ = pickle.loads(raw_message_bytes)
-        if typ in self._deserializers:
-            return self._deserializers[typ](raw_message_bytes)
+        return self._serde_registry.generic_deserialize(raw_message_bytes)
 
     def listen(
         self, *, queue_name: Optional[str] = None, exchange_name: Optional[str] = None
@@ -157,7 +222,12 @@ class Hatter:
         """
         completed_tasks, _ = await asyncio.wait(self._tasks, return_when=asyncio.FIRST_EXCEPTION)
 
-        # TODO need to check completed_tasks in case one threw an error
+        # Are there exceptions?
+        exceptions: List[BaseException] = [x.exception() for x in completed_tasks if x.exception() is not None]
+        for exception in exceptions:
+            logger.exception("Exception raised from listener", exc_info=exception)
+        if len(exceptions) > 0:
+            raise RuntimeError("One or more listeners raised an exception.")
 
     # TODO also need __aenter__ and __aexit__ paradigms if something like FastAPI will manage lifecycle?
     async def run(self, **kwargs):
@@ -203,12 +273,17 @@ class Hatter:
                 dynamic_callable_kwargs[param.name] = lambda msg: msg.reply_to
             elif param.name == "correlation_id":
                 dynamic_callable_kwargs[param.name] = lambda msg: msg.correlation_id
-            # If not, is it something we have a serde for?
-            elif param.annotation in self._deserializers.keys():
+            # If not, we assume it's intended to be deserialized from the message body.
+            else:
                 # We can only do this for one very special argument
                 if message_arg_name is None:
                     message_arg_name = param.name
-                    dynamic_callable_kwargs[param.name] = lambda msg: self._deserializers[param.annotation](msg.body)
+                    annotation = param.annotation
+
+                    def _deserialize(msg: IncomingMessage):
+                        return self._serde_registry[annotation].deserialize(msg.body, annotation)
+
+                    dynamic_callable_kwargs[param.name] = _deserialize
                 else:
                     raise ValueError(
                         f"{param.name} cannot be used for the message body; {message_arg_name} has already been allocated to this role."
@@ -221,16 +296,17 @@ class Hatter:
         # Consume from this queue, forever
         async for message in queue:
             message: IncomingMessage
-            # Build kwargs from fixed...
-            callable_kwargs = dict()
-            callable_kwargs.update(fixed_callable_kwargs)
-
-            # ... and dynamic (i.e. based on the message)
-            for kwarg, kwarg_function in dynamic_callable_kwargs.items():
-                callable_kwargs[kwarg] = kwarg_function(message)
-
-            # We call the registered coroutine/generator with these built kwargs
             try:
+                # Build kwargs from fixed...
+                callable_kwargs = dict()
+                callable_kwargs.update(fixed_callable_kwargs)
+
+                # ... and dynamic (i.e. based on the message)
+                for kwarg, kwarg_function in dynamic_callable_kwargs.items():
+                    callable_kwargs[kwarg] = kwarg_function(message)
+
+                # We call the registered coroutine/generator with these built kwargs
+
                 if inspect.iscoroutinefunction(registered_obj.coro_or_gen):
                     # it returns
                     return_val = await registered_obj.coro_or_gen(**callable_kwargs)
@@ -258,8 +334,15 @@ class Hatter:
                 message.nack(requeue=True)
                 logger.info("Cancellation requested.")
                 raise
-            except Exception:
+            except Exception as e:
                 # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
+                # Send exception to reply-to queue, if applicable
+                if message.reply_to is not None:
+                    try:
+                        await self.publish(HatterMessage(data=e, correlation_id=message.correlation_id, destination_queue=message.reply_to))
+                    except Exception as e_:
+                        logger.exception("Unreplyable exception", exc_info=e)
+                        logger.exception("Error sending exception back to reply-to queue", exc_info=e_)
                 message.nack(requeue=False)
                 logger.exception("Exception on message")
 
@@ -320,11 +403,10 @@ class Hatter:
     async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel):
         """Intelligently publishes the given message on the given channel"""
         # try to serialize message body
-        serializer = self._serializers.get(type(msg.data), None)
-        if serializer is None:
-            raise ValueError(f"No registered serializer compatible with {type(msg.data)}")
+        # TODO catch pickle errors
+        bites = self._serde_registry[type(msg.data)].serialize(msg.data)
 
-        amqp_message = Message(body=serializer(msg.data), reply_to=msg.reply_to_queue, correlation_id=msg.correlation_id)
+        amqp_message = Message(body=bites, reply_to=msg.reply_to_queue, correlation_id=msg.correlation_id)
         # TODO other fields like ttl
 
         # Exchange or queue based?
