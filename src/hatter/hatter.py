@@ -311,21 +311,12 @@ class Hatter:
                     # it returns
                     return_val = await registered_obj.coro_or_gen(**callable_kwargs)
                     if return_val is not None:
-                        if isinstance(return_val, HatterMessage):
-                            logger.debug(f"Publishing {return_val}")
-                            await self.publish(return_val)
-                        else:
-                            raise ValueError(f"Only HatterMessage objects may be returned, not {type(return_val)}")
+                        await self._handle_return_value(message, return_val)
                 else:
                     # it yields
                     async for v in registered_obj.coro_or_gen(**callable_kwargs):
-                        if v is None:
-                            continue
-                        if isinstance(v, HatterMessage):
-                            logger.debug(f"Publishing {v}")
-                            await self.publish(v)
-                        else:
-                            raise ValueError(f"Only HatterMessage objects may be yielded, not {type(v)}")
+                        if v is not None:
+                            await self._handle_return_value(message, v)
                 # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
                 # TODO consider doing all of this transactionally
                 message.ack()
@@ -399,6 +390,23 @@ class Hatter:
         """
         _, queue = await create_exchange_queue(None, None, await self._amqp_manager.new_channel())
         return queue
+
+    async def _handle_return_value(self, triggering_message: Message, return_val: Any):
+        if isinstance(return_val, HatterMessage):
+            logger.debug(f"Publishing {return_val}")
+            await self.publish(return_val)
+        else:
+            # RPC?
+            if triggering_message.reply_to is not None:
+                # box it into a HatterMessage
+                rpc_reply = HatterMessage(
+                    data=return_val, destination_queue=triggering_message.reply_to, correlation_id=triggering_message.correlation_id
+                )
+                await self.publish(rpc_reply)
+            else:
+                raise ValueError(
+                    f"Return/yield objects must be `HatterMessage`s, or incoming message must contain 'reply_to' queue (i.e., RPC pattern)."
+                )
 
     async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel):
         """Intelligently publishes the given message on the given channel"""
