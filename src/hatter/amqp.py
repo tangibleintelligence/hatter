@@ -15,8 +15,11 @@ class AMQPManager:
     Creates and manages a connection to interact with a RabbitMQ instance.
     """
 
-    def __init__(self, rabbitmq_host: str, rabbitmq_user: str, rabbitmq_pass: str, rabbitmq_virtual_host: str = "/"):
+    def __init__(
+        self, rabbitmq_host: str, rabbitmq_user: str, rabbitmq_pass: str, rabbitmq_virtual_host: str = "/", rabbitmq_port: int = 5672
+    ):
         self._rabbitmq_host = rabbitmq_host
+        self._rabbitmq_port = rabbitmq_port
         self._rabbitmq_user = rabbitmq_user
         self._rabbitmq_pass = rabbitmq_pass
         self._rabbitmq_virtual_host = rabbitmq_virtual_host
@@ -26,7 +29,11 @@ class AMQPManager:
     async def __aenter__(self):
         # Create connection based on args passed in init. Channels will be created as needed per queue
         self._connection = await aio_pika.connect_robust(
-            host=self._rabbitmq_host, login=self._rabbitmq_user, password=self._rabbitmq_pass, virtualhost=self._rabbitmq_virtual_host
+            host=self._rabbitmq_host,
+            port=self._rabbitmq_port,
+            login=self._rabbitmq_user,
+            password=self._rabbitmq_pass,
+            virtualhost=self._rabbitmq_virtual_host,
         )
 
         # Create a channel for ad-hoc publishing of messages
