@@ -46,8 +46,8 @@ class AMQPManager:
         if self._connection is not None:
             await self._connection.close()
 
-    async def new_channel(self, prefetch=1):
-        channel = await self._connection.channel()
+    async def new_channel(self, prefetch=1, on_return_raises=True):
+        channel = await self._connection.channel(on_return_raises=on_return_raises)
         await channel.set_qos(prefetch_count=prefetch)
         return channel
 
