@@ -8,6 +8,7 @@ from logging import getLogger
 from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple
 
 from aio_pika import IncomingMessage, Channel, Message, Queue
+from aiormq import PublishError
 
 from hatter.amqp import AMQPManager
 from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
@@ -395,8 +396,12 @@ class Hatter:
 
     async def _handle_return_value(self, triggering_message: Message, return_val: Any):
         if isinstance(return_val, HatterMessage):
-            logger.debug(f"Publishing {return_val}")
-            await self.publish(return_val)
+            try:
+                logger.debug(f"Publishing {return_val}")
+                await self.publish(return_val)
+            except PublishError as e:
+                # TODO save to mongo or something?
+                logger.exception(f"Unable to transmit return message {return_val}", e)
         else:
             # RPC?
             if triggering_message.reply_to is not None:
@@ -404,7 +409,14 @@ class Hatter:
                 rpc_reply = HatterMessage(
                     data=return_val, destination_queue=triggering_message.reply_to, correlation_id=triggering_message.correlation_id
                 )
-                await self.publish(rpc_reply)
+                try:
+                    await self.publish(rpc_reply)
+                except PublishError as e:
+                    logger.exception(f"Unable to transmit response to RPC queue {triggering_message.reply_to}.", e)
+                    if isinstance(return_val, Exception):
+                        logger.info(f"Return value was exception:", exc_info=return_val)
+                    else:
+                        logger.info(f"Return value was: {return_val}")
             else:
                 raise ValueError(
                     f"Return/yield objects must be `HatterMessage`s, or incoming message must contain 'reply_to' queue (i.e., RPC pattern)."
