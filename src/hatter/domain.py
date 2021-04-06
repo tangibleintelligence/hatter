@@ -18,6 +18,7 @@ class RegisteredCoroOrGen(BaseModel):
     coro_or_gen: Union[DecoratedCoroOrGen, Callable]
     queue_name: Optional[str]
     exchange_name: Optional[str]
+    concurrency: int
 
     @root_validator
     def at_least_one(cls, values):

@@ -3,7 +3,9 @@ Defines main object which is used to decorate methods
 """
 import asyncio
 import inspect
+import logging
 import pickle
+import warnings
 from logging import getLogger
 from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple
 
@@ -15,6 +17,7 @@ from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
 from hatter.util import get_substitution_names, create_exchange_queue, flexible_is_subclass
 
 logger = getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 T = NewType("T", object)
 
@@ -32,12 +35,22 @@ class _Serde:
         return pickle.dumps((obj_bytes, type(obj)))
 
     def deserialize(self, bites: bytes, expected_type: Optional[Type[T]] = None) -> T:
-        obj_bytes, typ = self.deserialize_raw(bites)
-        if expected_type is not None:
-            if not flexible_is_subclass(typ, expected_type):
-                raise ValueError(f"Unexpected object after deserialization: expected {expected_type}, provided {typ}")
+        try:
+            obj_bytes, typ = self.deserialize_raw(bites)
+            if expected_type is not None:
+                if not flexible_is_subclass(typ, expected_type):
+                    raise ValueError(f"Unexpected object after deserialization: expected {expected_type}, provided {typ}")
 
-        return self._obj_deserializer(obj_bytes)
+            return self._obj_deserializer(obj_bytes)
+        except pickle.UnpicklingError as e:
+            # Perhaps it wasn't published using hatter? Try to deserialize directly
+            try:
+                ret = self._obj_deserializer(bites)
+                warnings.warn("Submitted message was not published with hatter, and type cannot be checked.")
+                logger.debug("Unpickling error:", exc_info=e)
+                return ret
+            except Exception as e:
+                raise ValueError(f"Cannot deserialize bytes. (Starting bytes: [{bites[:-20]}].)", e)
 
     @staticmethod
     def deserialize_raw(raw_bytes: bytes) -> Tuple[bytes, Type[T]]:
@@ -146,7 +159,7 @@ class Hatter:
         return self._serde_registry.generic_deserialize(raw_message_bytes)
 
     def listen(
-        self, *, queue_name: Optional[str] = None, exchange_name: Optional[str] = None
+        self, *, queue_name: Optional[str] = None, exchange_name: Optional[str] = None, concurrency: int = 1
     ) -> Callable[[Union[DecoratedCoroOrGen]], DecoratedCoroOrGen]:
         """
         Registers decorated coroutine (`async def`) or async generator (`async def` with `yield` instead of return) to run when a message is
@@ -162,6 +175,10 @@ class Hatter:
         be established to consume from this exchange. If _both_ an exchange and queue are passed, the exchange will still be assumed to
         be a fanout exchange, but the named queue will be used instead of a temporary one.
 
+        If concurrency is passed and > 1, then that many messages will be processed concurrently, if available from the queue. Note that
+        due to Python's GIL, actual parallel processing cannot happen in threads, so this should generally be used for coroutines which
+        are not CPU intensive, and/or spend a lot of time `await`ing other coroutines.
+
         TODO If an exchange_name is passed, headers can also be passed to make it a headers exchange.
 
         TODO maybe there's a cleaner way to do this? ^
@@ -170,7 +187,7 @@ class Hatter:
         def decorator(coro_or_gen: DecoratedCoroOrGen) -> DecoratedCoroOrGen:
             # Register this coroutine/async-generator for later listening
             if inspect.iscoroutinefunction(coro_or_gen) or inspect.isasyncgenfunction(coro_or_gen):
-                self._register_listener(coro_or_gen, queue_name, exchange_name)
+                self._register_listener(coro_or_gen, queue_name, exchange_name, concurrency)
                 return coro_or_gen
             else:
                 raise ValueError(
@@ -180,11 +197,15 @@ class Hatter:
 
         return decorator
 
-    def _register_listener(self, coro_or_gen: DecoratedCoroOrGen, queue_name: Optional[str], exchange_name: Optional[str]):
+    def _register_listener(
+        self, coro_or_gen: DecoratedCoroOrGen, queue_name: Optional[str], exchange_name: Optional[str], concurrency: int
+    ):
         """
         Adds function to registry
         """
-        self._registry.append(RegisteredCoroOrGen(coro_or_gen=coro_or_gen, queue_name=queue_name, exchange_name=exchange_name))
+        self._registry.append(
+            RegisteredCoroOrGen(coro_or_gen=coro_or_gen, queue_name=queue_name, exchange_name=exchange_name, concurrency=concurrency)
+        )
 
     def __call__(self, **kwargs):
         """
@@ -206,10 +227,9 @@ class Hatter:
         perform a subsequent blocking call within the `async with` block, or use the shorthand `.run(**kwargs)` method.
         """
         await self._amqp_manager.__aenter__()
-        # TODO experiment with one channel per consumption
-        consume_channel = await self._amqp_manager.new_channel()
 
         for registered_obj in self._registry:
+            consume_channel = await self._amqp_manager.new_channel(prefetch=registered_obj.concurrency)
             self._tasks.append(asyncio.create_task(self.consume_coro_or_gen(registered_obj, consume_channel, self._run_kwargs)))
 
         # TODO need a way to monitor for any of these tasks failing and either restart them or abort everything
@@ -309,36 +329,15 @@ class Hatter:
                     callable_kwargs[kwarg] = kwarg_function(message)
 
                 # We call the registered coroutine/generator with these built kwargs
-
-                if inspect.iscoroutinefunction(registered_obj.coro_or_gen):
-                    # it returns
-                    return_val = await registered_obj.coro_or_gen(**callable_kwargs)
-                    if return_val is not None:
-                        await self._handle_return_value(message, return_val)
-                else:
-                    # it yields
-                    async for v in registered_obj.coro_or_gen(**callable_kwargs):
-                        if v is not None:
-                            await self._handle_return_value(message, v)
-                # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
-                # TODO consider doing all of this transactionally
-                message.ack()
+                # Do this in a coroutine so that other messages can be processed concurrently
+                asyncio.create_task(self._process_message(message, registered_obj, **callable_kwargs))
             except asyncio.CancelledError:
                 # We were told to cancel. nack with requeue so someone else will pick up the work
                 message.nack(requeue=True)
-                logger.info("Cancellation requested.")
+                logger.info("Cancellation requested during message task instantiation.")
                 raise
             except Exception as e:
-                # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
-                # Send exception to reply-to queue, if applicable
-                if message.reply_to is not None:
-                    try:
-                        await self.publish(HatterMessage(data=e, correlation_id=message.correlation_id, destination_queue=message.reply_to))
-                    except Exception as e_:
-                        logger.exception("Unreplyable exception", exc_info=e)
-                        logger.exception("Error sending exception back to reply-to queue", exc_info=e_)
-                message.nack(requeue=False)
-                logger.exception("Exception on message")
+                await self._handle_message_exception(message, e)
 
     @staticmethod
     async def build_exchange_queue_names(registered_obj, run_kwargs):
@@ -394,6 +393,31 @@ class Hatter:
         _, queue = await create_exchange_queue(None, None, await self._amqp_manager.new_channel())
         return queue
 
+    async def _process_message(self, message: IncomingMessage, registered_obj: RegisteredCoroOrGen, **callable_kwargs):
+        logger.debug(f"Processing message {message.delivery_tag}")
+        try:
+            if inspect.iscoroutinefunction(registered_obj.coro_or_gen):
+                # it returns
+                return_val = await registered_obj.coro_or_gen(**callable_kwargs)
+                if return_val is not None:
+                    await self._handle_return_value(message, return_val)
+            else:
+                # it yields
+                async for v in registered_obj.coro_or_gen(**callable_kwargs):
+                    if v is not None:
+                        await self._handle_return_value(message, v)
+            # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
+            # TODO consider doing all of this transactionally
+            logger.debug(f"Acking message {message.delivery_tag}")
+            message.ack()
+        except asyncio.CancelledError:
+            # We were told to cancel. nack with requeue so someone else will pick up the work
+            message.nack(requeue=True)
+            logger.info("Cancellation requested.")
+            raise
+        except Exception as e_:
+            await self._handle_message_exception(message, e_)
+
     async def _handle_return_value(self, triggering_message: Message, return_val: Any):
         if isinstance(return_val, HatterMessage):
             try:
@@ -412,7 +436,7 @@ class Hatter:
                 try:
                     await self.publish(rpc_reply)
                 except PublishError as e:
-                    logger.exception(f"Unable to transmit response to RPC queue {triggering_message.reply_to}.", e)
+                    logger.exception(f"Unable to transmit response to RPC queue {triggering_message.reply_to}.", exc_info=e)
                     if isinstance(return_val, Exception):
                         logger.info(f"Return value was exception:", exc_info=return_val)
                     else:
@@ -421,6 +445,18 @@ class Hatter:
                 raise ValueError(
                     f"Return/yield objects must be `HatterMessage`s, or incoming message must contain 'reply_to' queue (i.e., RPC pattern)."
                 )
+
+    async def _handle_message_exception(self, message, exception):
+        # Send exception to reply-to queue, if applicable
+        # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
+        if message.reply_to is not None:
+            try:
+                await self.publish(HatterMessage(data=exception, correlation_id=message.correlation_id, destination_queue=message.reply_to))
+            except Exception as e_:
+                logger.exception("Unreplyable exception", exc_info=exception)
+                logger.exception("Error sending exception back to reply-to queue", exc_info=e_)
+        message.nack(requeue=False)
+        logger.exception("Exception on message")
 
     async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel):
         """Intelligently publishes the given message on the given channel"""
