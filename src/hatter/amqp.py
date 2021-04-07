@@ -16,12 +16,13 @@ class AMQPManager:
     """
 
     def __init__(
-        self, rabbitmq_host: str, rabbitmq_user: str, rabbitmq_pass: str, rabbitmq_virtual_host: str = "/", rabbitmq_port: int = 5672
+        self, rabbitmq_host: str, rabbitmq_user: str, rabbitmq_pass: str, rabbitmq_virtual_host: str, rabbitmq_port: int, tls: bool
     ):
         self._rabbitmq_host = rabbitmq_host
         self._rabbitmq_port = rabbitmq_port
         self._rabbitmq_user = rabbitmq_user
         self._rabbitmq_pass = rabbitmq_pass
+        self._tls = tls
         self._rabbitmq_virtual_host = rabbitmq_virtual_host
         self._connection: RobustConnection = None
         self._publish_channel: Channel = None
@@ -34,6 +35,7 @@ class AMQPManager:
             login=self._rabbitmq_user,
             password=self._rabbitmq_pass,
             virtualhost=self._rabbitmq_virtual_host,
+            ssl=self._tls
         )
 
         # Create a channel for ad-hoc publishing of messages

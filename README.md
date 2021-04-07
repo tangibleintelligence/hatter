@@ -1,4 +1,5 @@
 [![Build Status](https://cloud.drone.io/api/badges/tangibleintelligence/hatter/status.svg)](https://cloud.drone.io/tangibleintelligence/hatter)
+[![PyPI version](https://badge.fury.io/py/hatter.svg)](https://badge.fury.io/py/hatter)
 
 # hatter
 Framework to easily create microservices backed by a RabbitMQ broker.

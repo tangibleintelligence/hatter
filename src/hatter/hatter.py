@@ -130,11 +130,19 @@ class Hatter:
     """
 
     def __init__(
-        self, rabbitmq_host: str, rabbitmq_user: str, rabbitmq_pass: str, rabbitmq_virtual_host: str = "/", rabbitmq_port: int = 5672
+        self,
+        rabbitmq_host: str,
+        rabbitmq_user: str,
+        rabbitmq_pass: str,
+        rabbitmq_virtual_host: str = "/",
+        rabbitmq_port: int = 5672,
+        tls: bool = False,
     ):
 
         # Init an AMQPManager. Actual connectivity isn't started until __enter__ via a with block.
-        self._amqp_manager: AMQPManager = AMQPManager(rabbitmq_host, rabbitmq_user, rabbitmq_pass, rabbitmq_virtual_host, rabbitmq_port)
+        self._amqp_manager: AMQPManager = AMQPManager(
+            rabbitmq_host, rabbitmq_user, rabbitmq_pass, rabbitmq_virtual_host, rabbitmq_port, tls
+        )
 
         # we need a registry of coroutines and/or async generators (to be added via @hatter.listen(...) decorators). Each coroutine or
         # generator in this registry will be set as a callback for its associated queue when calling `run`
