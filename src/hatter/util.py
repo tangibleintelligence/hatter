@@ -6,6 +6,9 @@ import warnings
 from typing import Set, Optional, Tuple
 
 from aio_pika import Channel, Exchange, Queue, ExchangeType
+from aiormq import ChannelPreconditionFailed
+
+from hatter.domain import MAX_MESSAGE_PRIORITY
 
 
 def get_substitution_names(a_str: str) -> Set[str]:
@@ -28,7 +31,17 @@ async def create_exchange_queue(
 
     if queue_name is not None:
         # Named queues are always durable and presumed to be shared
-        queue = await consume_channel.declare_queue(queue_name, durable=True, exclusive=False, auto_delete=False)
+        try:
+            queue = await _declare_named_queue(consume_channel, queue_name)
+        except ChannelPreconditionFailed as e:
+            if e.args is not None and len(e.args) > 0 and "x-max-priority" in e.args[0]:
+                # For backwards compatibility, if a queue was previously declared without a priority, redeclare it with one.
+                warnings.warn(f"Redeclaring queue {queue_name} to support message priority. Any pending messages will be lost.")
+                await consume_channel.reopen()  # The ChannelPreconditionFailed error will cause the channel to close
+                await consume_channel.queue_delete(queue_name)
+                queue = await _declare_named_queue(consume_channel, queue_name)
+            else:
+                raise e
     else:
         # Anonymous queues are transient/temporary
         queue = await consume_channel.declare_queue(None, durable=False, exclusive=True, auto_delete=True)
@@ -39,6 +52,12 @@ async def create_exchange_queue(
         await queue.bind(exchange)  # TODO include headers functionality
 
     return exchange, queue
+
+
+async def _declare_named_queue(consume_channel, queue_name):
+    return await consume_channel.declare_queue(
+        queue_name, durable=True, exclusive=False, auto_delete=False, arguments={"x-max-priority": MAX_MESSAGE_PRIORITY}
+    )
 
 
 def flexible_is_subclass(cls: type, potential_superclass: type) -> bool:

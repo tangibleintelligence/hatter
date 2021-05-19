@@ -4,7 +4,9 @@ Data objects
 from typing import Any, TypeVar, Optional, Coroutine, Union, AsyncGenerator, Callable
 from uuid import uuid4
 
-from pydantic import BaseModel, root_validator, validator
+from pydantic import BaseModel, root_validator, validator, Field
+
+MAX_MESSAGE_PRIORITY = 10
 
 DecoratedCoro = TypeVar("DecoratedCoro", bound=Coroutine[None, None, Any])
 DecoratedGen = TypeVar("DecoratedGen", bound=AsyncGenerator[Any, None])
@@ -39,6 +41,11 @@ class HatterMessage(BaseModel):
     destination_exchange: Optional[str]
     destination_queue: Optional[str]
     routing_key: Optional[str]
+    priority: Optional[int] = Field(default=None, ge=1, le=MAX_MESSAGE_PRIORITY)
+    """
+    Larger values for priority are considered higher priority. By default, messages will be treated with priority 0, but can be
+    overridden to be between 1 and 10, inclusive. Messages of the same priority are handled in a FIFO manner.
+    """
     # TODO headers ttl etc
 
     @validator("correlation_id", always=True)

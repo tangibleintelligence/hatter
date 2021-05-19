@@ -472,7 +472,7 @@ class Hatter:
         # TODO catch pickle errors
         bites = self._serde_registry[type(msg.data)].serialize(msg.data)
 
-        amqp_message = Message(body=bites, reply_to=msg.reply_to_queue, correlation_id=msg.correlation_id)
+        amqp_message = Message(body=bites, reply_to=msg.reply_to_queue, correlation_id=msg.correlation_id, priority=msg.priority)
         # TODO other fields like ttl
 
         # Exchange or queue based?
