@@ -20,6 +20,7 @@ logger = getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 T = NewType("T", object)
+SINGLE_ARG_KEY = "__single_arg__"
 
 
 class _Serde:
@@ -281,14 +282,16 @@ class Hatter:
 
         # Make sure that all args/kwargs of decorated coro/generator are accounted for. We support:
         # - An unlimited number of kwargs which match one to one with a param in the queue and/or exchange name (will be passed through)
-        # - A single kwarg which isn't one of these params, but which we can serialize/deserialize. This is assumed to be the message body
+        # - An unlimited number of kwargs which aren't one of these params, but which we can serialize/deserialize. These are transmitted
+        #   as the message body. If there's only one kwarg in this category, then the HatterMessage doesn't need to explicitly name it...we
+        #   can match it up regardless.
         # - A few specific other kwargs:
         #   - reply_to: str
         #   - correlation_id: str
         #   TODO any more?
         fixed_callable_kwargs: Dict[str, Any] = dict()
         dynamic_callable_kwargs: Dict[str, Callable[[IncomingMessage], Any]] = dict()
-        message_arg_name = None  # This is special for the argument that we'll passed the deserialized message into
+        message_body_kwargs: Dict[str, Callable[[bytes], Any]] = dict()
 
         parameters = inspect.signature(registered_obj.coro_or_gen).parameters
         for param in parameters.values():
@@ -306,20 +309,12 @@ class Hatter:
                 dynamic_callable_kwargs[param.name] = lambda msg: msg.correlation_id
             # If not, we assume it's intended to be deserialized from the message body.
             else:
-                # We can only do this for one very special argument
-                if message_arg_name is None:
-                    message_arg_name = param.name
-                    annotation = param.annotation
+                annotation = param.annotation
 
-                    def _deserialize(msg: IncomingMessage):
-                        return self._serde_registry[annotation].deserialize(msg.body, annotation)
+                def _deserialize(data: bytes):
+                    return self._serde_registry[annotation].deserialize(data, annotation)
 
-                    dynamic_callable_kwargs[param.name] = _deserialize
-                else:
-                    raise ValueError(
-                        f"{param.name} cannot be used for the message body; {message_arg_name} has already been allocated to this role."
-                    )
-            # TODO error out?
+                message_body_kwargs[param.name] = _deserialize
 
         # Create exchange and/or queue
         exchange, queue = await create_exchange_queue(ex_name, q_name, consume_channel)
@@ -332,9 +327,32 @@ class Hatter:
                 callable_kwargs = dict()
                 callable_kwargs.update(fixed_callable_kwargs)
 
-                # ... and dynamic (i.e. based on the message)
+                # ... dynamic (i.e. based on the message but used for routing/config) ...
                 for kwarg, kwarg_function in dynamic_callable_kwargs.items():
                     callable_kwargs[kwarg] = kwarg_function(message)
+
+                # ... and message body (i.e. based on the message and passed into the function)
+                # Extract the message body (will be a dict of str to bytes where the str = kwarg name and bytes = kwarg value (serialized))
+                message_dict: Dict[str, bytes] = pickle.loads(message.body)
+                for kwarg, kwarg_function in message_body_kwargs.items():
+                    if kwarg in message_dict:
+                        callable_kwargs[kwarg] = kwarg_function(message_dict[kwarg])
+
+                # Also, if there's only one message body kwarg, then we want to allow it to be implicitly defined from
+                # `data` in the HatterMessage.
+                if len(message_body_kwargs) == 1:
+                    single_message_body_kwarg, single_kwarg_function = next(iter(message_body_kwargs.items()))
+
+                    # In this case, we want to cover the case where HatterMessage.data is itself the value that this
+                    # singular kwarg should be set to.
+                    if SINGLE_ARG_KEY in message_dict:
+                        # On publish, non-dicts get boxed into a dict with a special key.
+                        callable_kwargs[single_message_body_kwarg] = single_kwarg_function(message_dict[SINGLE_ARG_KEY])
+                    elif single_message_body_kwarg not in message_dict:
+                        # Assume that a dict _was_ the actual single value intended to be passed (and not a mapping from kwarg names
+                        # to values).
+
+                        callable_kwargs[single_message_body_kwarg] = {k: self.generic_deserialize(v) for k, v in message_dict.items()}
 
                 # We call the registered coroutine/generator with these built kwargs
                 # Do this in a coroutine so that other messages can be processed concurrently
@@ -470,7 +488,15 @@ class Hatter:
         """Intelligently publishes the given message on the given channel"""
         # try to serialize message body
         # TODO catch pickle errors
-        bites = self._serde_registry[type(msg.data)].serialize(msg.data)
+
+        if not isinstance(msg.data, dict):
+            # wrap in a dict with a special key. This item can be passed into a one-argument function.
+            data_dict = {SINGLE_ARG_KEY: msg.data}
+        else:
+            data_dict = msg.data
+
+        bites_dict: Dict[str, bytes] = {k: self._serde_registry[type(v)].serialize(v) for k, v in data_dict.items()}
+        bites: bytes = pickle.dumps(bites_dict)
 
         amqp_message = Message(body=bites, reply_to=msg.reply_to_queue, correlation_id=msg.correlation_id, priority=msg.priority)
         # TODO other fields like ttl

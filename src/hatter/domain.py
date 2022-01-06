@@ -1,7 +1,7 @@
 """
 Data objects
 """
-from typing import Any, TypeVar, Optional, Coroutine, Union, AsyncGenerator, Callable
+from typing import Any, TypeVar, Optional, Coroutine, Union, AsyncGenerator, Callable, Dict
 from uuid import uuid4
 
 from pydantic import BaseModel, root_validator, validator, Field
@@ -35,7 +35,7 @@ class RegisteredCoroOrGen(BaseModel):
 
 
 class HatterMessage(BaseModel):
-    data: Any
+    data: Union[Dict[str, Any], Any]
     reply_to_queue: Optional[str]
     correlation_id: Optional[str]
     destination_exchange: Optional[str]
