@@ -5,7 +5,7 @@ with open("README.md", encoding="utf-8") as readme:
 
 setup(
     name="hatter",
-    version="0.2.0",
+    version="0.3.0",
     description="Framework to easily create microservices backed by a RabbitMQ broker",
     long_description=LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
