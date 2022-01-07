@@ -33,6 +33,12 @@ async def do_something3(var1: str, msg: str):
     print("var1 was", var1)
 
 
+@hatter.listen(queue_name="queue_multi_arg_{var1}")
+async def do_something1(var1: str, b: int, c: int):
+    print("var1", var1)
+    print("b", b)
+    print("c", c)
+
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     try:

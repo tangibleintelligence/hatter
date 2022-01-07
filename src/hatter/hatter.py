@@ -6,6 +6,7 @@ import inspect
 import logging
 import pickle
 import warnings
+from copy import deepcopy
 from logging import getLogger
 from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple
 
@@ -20,7 +21,6 @@ logger = getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 T = NewType("T", object)
-SINGLE_ARG_KEY = "__single_arg__"
 
 
 class _Serde:
@@ -309,10 +309,9 @@ class Hatter:
                 dynamic_callable_kwargs[param.name] = lambda msg: msg.correlation_id
             # If not, we assume it's intended to be deserialized from the message body.
             else:
-                annotation = param.annotation
 
-                def _deserialize(data: bytes):
-                    return self._serde_registry[annotation].deserialize(data, annotation)
+                def _deserialize(data_: bytes, annotation_=param.annotation):
+                    return self._serde_registry[annotation_].deserialize(data_, annotation_)
 
                 message_body_kwargs[param.name] = _deserialize
 
@@ -332,27 +331,37 @@ class Hatter:
                     callable_kwargs[kwarg] = kwarg_function(message)
 
                 # ... and message body (i.e. based on the message and passed into the function)
-                # Extract the message body (will be a dict of str to bytes where the str = kwarg name and bytes = kwarg value (serialized))
-                message_dict: Dict[str, bytes] = pickle.loads(message.body)
-                for kwarg, kwarg_function in message_body_kwargs.items():
-                    if kwarg in message_dict:
-                        callable_kwargs[kwarg] = kwarg_function(message_dict[kwarg])
+                # Extract the message body
 
-                # Also, if there's only one message body kwarg, then we want to allow it to be implicitly defined from
-                # `data` in the HatterMessage.
-                if len(message_body_kwargs) == 1:
-                    single_message_body_kwarg, single_kwarg_function = next(iter(message_body_kwargs.items()))
+                data = self.generic_deserialize(message.body)
 
-                    # In this case, we want to cover the case where HatterMessage.data is itself the value that this
-                    # singular kwarg should be set to.
-                    if SINGLE_ARG_KEY in message_dict:
-                        # On publish, non-dicts get boxed into a dict with a special key.
-                        callable_kwargs[single_message_body_kwarg] = single_kwarg_function(message_dict[SINGLE_ARG_KEY])
-                    elif single_message_body_kwarg not in message_dict:
+                # If a dict, special handling
+                if isinstance(data, dict):
+                    # The passed dict might be the entire value of a single kwarg function. Check for that...
+                    # single_message_body_kwarg, single_kwarg_function = next(iter(message_body_kwargs.items()))
+                    if (
+                        len(message_body_kwargs) == 1
+                        and (single_message_body_kwarg := next(iter(message_body_kwargs.items()))[0]) not in data
+                    ):
+                        # This means there's one kwarg on the hatter'ed function, _and_ that kwarg name doesn't exist in the dict
                         # Assume that a dict _was_ the actual single value intended to be passed (and not a mapping from kwarg names
                         # to values).
-
-                        callable_kwargs[single_message_body_kwarg] = {k: self.generic_deserialize(v) for k, v in message_dict.items()}
+                        callable_kwargs[single_message_body_kwarg] = {k: self.generic_deserialize(v) for k, v in data.items()}
+                    else:
+                        # Assume that the dict keys are function kwargs
+                        for kwarg, kwarg_function in message_body_kwargs.items():
+                            if kwarg in data:
+                                callable_kwargs[kwarg] = kwarg_function(data[kwarg])
+                else:
+                    # Better hope that there's only one arg to the function. If there is, pass in the data object to it
+                    if len(message_body_kwargs) == 1:
+                        single_message_body_kwarg, single_kwarg_function = next(iter(message_body_kwargs.items()))
+                        # Use the explicit typed serde instead of generic_deserialize
+                        callable_kwargs[single_message_body_kwarg] = single_kwarg_function(message.body)
+                    else:
+                        raise RuntimeError(
+                            "Decorated coroutine has more than one body argument, but a dictionary was not passed as the message."
+                        )
 
                 # We call the registered coroutine/generator with these built kwargs
                 # Do this in a coroutine so that other messages can be processed concurrently
@@ -489,14 +498,14 @@ class Hatter:
         # try to serialize message body
         # TODO catch pickle errors
 
-        if not isinstance(msg.data, dict):
-            # wrap in a dict with a special key. This item can be passed into a one-argument function.
-            data_dict = {SINGLE_ARG_KEY: msg.data}
+        if isinstance(msg.data, dict):
+            # serialize each dict value using a matching serde...
+            bites_dict: Dict[str, bytes] = {k: self._serde_registry[type(v)].serialize(v) for k, v in msg.data.items()}
+            # ...then serialize the new str -> bytes dict for transmit
+            bites: bytes = self._serde_registry[dict].serialize(bites_dict)
         else:
-            data_dict = msg.data
-
-        bites_dict: Dict[str, bytes] = {k: self._serde_registry[type(v)].serialize(v) for k, v in data_dict.items()}
-        bites: bytes = pickle.dumps(bites_dict)
+            # just have to serialize the raw value as needed
+            bites: bytes = self._serde_registry[type(msg.data)].serialize(msg.data)
 
         amqp_message = Message(body=bites, reply_to=msg.reply_to_queue, correlation_id=msg.correlation_id, priority=msg.priority)
         # TODO other fields like ttl
