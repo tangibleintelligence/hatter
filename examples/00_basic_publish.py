@@ -23,6 +23,9 @@ async def publish_sample():
         msg = HatterMessage(data={"ms2": "abc"}, destination_queue="queue_for_ex")
         await hatter.publish(msg)
 
+        msg = HatterMessage(data={'b': 2, "c": 3}, destination_queue="queue_multi_arg_var1_value")
+        await hatter.publish(msg)
+
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()

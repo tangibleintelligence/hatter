@@ -13,7 +13,7 @@ setup(
     author_email="austin@tangibleintelligence.com",
     packages=find_packages("src"),
     package_dir={"": "src"},
-    python_requires=">3.6.1",
+    python_requires=">3.8",
     install_requires=[
         "aio-pika>=6.7,<7", "pydantic>=1.7.3,<2"
     ],
