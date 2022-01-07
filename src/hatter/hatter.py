@@ -6,6 +6,7 @@ import inspect
 import logging
 import pickle
 import warnings
+from copy import deepcopy
 from logging import getLogger
 from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple
 
@@ -308,10 +309,9 @@ class Hatter:
                 dynamic_callable_kwargs[param.name] = lambda msg: msg.correlation_id
             # If not, we assume it's intended to be deserialized from the message body.
             else:
-                annotation = param.annotation
 
-                def _deserialize(data: bytes):
-                    return self._serde_registry[annotation].deserialize(data, annotation)
+                def _deserialize(data_: bytes, annotation_=param.annotation):
+                    return self._serde_registry[annotation_].deserialize(data_, annotation_)
 
                 message_body_kwargs[param.name] = _deserialize
 
