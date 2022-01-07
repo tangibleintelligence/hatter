@@ -6,9 +6,8 @@ import inspect
 import logging
 import pickle
 import warnings
-from copy import deepcopy
 from logging import getLogger
-from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple
+from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin
 
 from aio_pika import IncomingMessage, Channel, Message, Queue
 from aiormq import PublishError
@@ -309,9 +308,21 @@ class Hatter:
                 dynamic_callable_kwargs[param.name] = lambda msg: msg.correlation_id
             # If not, we assume it's intended to be deserialized from the message body.
             else:
+                # Convert the annotation to a type (if possible)
+                ann = param.annotation
+                if isinstance(ann, type):
+                    typ = ann
+                elif isinstance(get_origin(ann), type):
+                    typ = get_origin(ann)
+                else:
+                    # Generically deserialize. Not perfect because we don't have a second validation.
+                    typ = None
 
-                def _deserialize(data_: bytes, annotation_=param.annotation):
-                    return self._serde_registry[annotation_].deserialize(data_, annotation_)
+                def _deserialize(data_: bytes, type_=typ):
+                    if type_ is None:
+                        return self.generic_deserialize(data_)
+                    else:
+                        return self._serde_registry[type_].deserialize(data_, type_)
 
                 message_body_kwargs[param.name] = _deserialize
 
