@@ -15,6 +15,6 @@ setup(
     package_dir={"": "src"},
     python_requires=">3.8",
     install_requires=[
-        "aio-pika>=6.7,<7", "pydantic>=1.7.3,<2"
+        "aio-pika>=7.0.1,<8", "pydantic>=1.7.3,<2"
     ],
 )

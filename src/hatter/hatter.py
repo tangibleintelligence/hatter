@@ -379,7 +379,7 @@ class Hatter:
                 asyncio.create_task(self._process_message(message, registered_obj, **callable_kwargs))
             except asyncio.CancelledError:
                 # We were told to cancel. nack with requeue so someone else will pick up the work
-                message.nack(requeue=True)
+                await message.nack(requeue=True)
                 logger.info("Cancellation requested during message task instantiation.")
                 raise
             except Exception as e:
@@ -455,10 +455,10 @@ class Hatter:
             # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
             # TODO consider doing all of this transactionally
             logger.debug(f"Acking message {message.delivery_tag}")
-            message.ack()
+            await message.ack()
         except asyncio.CancelledError:
             # We were told to cancel. nack with requeue so someone else will pick up the work
-            message.nack(requeue=True)
+            await message.nack(requeue=True)
             logger.info("Cancellation requested.")
             raise
         except Exception as e_:
