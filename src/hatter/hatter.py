@@ -487,8 +487,9 @@ class Hatter:
                     else:
                         logger.info(f"Return value was: {return_val}")
             else:
-                raise ValueError(
-                    f"Return/yield objects must be `HatterMessage`s, or incoming message must contain 'reply_to' queue (i.e., RPC pattern)."
+                warnings.warn(
+                    f"Decorated coroutine/generator returned/yielded a {type(return_val)} value, but incoming message did not contain a "
+                    f"'reply_to' queue (i.e., RPC pattern)."
                 )
 
     async def _handle_message_exception(self, message, exception):
