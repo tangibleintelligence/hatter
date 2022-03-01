@@ -1,2 +1,2 @@
-aio-pika==7.0.1
+aio-pika==7.1.0
 pydantic==1.8.2

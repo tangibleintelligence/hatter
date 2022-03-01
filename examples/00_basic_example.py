@@ -6,7 +6,7 @@ import asyncio
 from hatter.domain import HatterMessage
 from hatter.hatter import Hatter
 
-hatter = Hatter("rabbitmq.tangible.ai", "rabbitmq", "rabbitmq-pass", "vh")
+hatter = Hatter("localhost", "backend", "backend", "rc")
 
 
 hatter.register_serde(str, lambda x: x.encode("UTF-8"), lambda x: x.decode("UTF-8"))

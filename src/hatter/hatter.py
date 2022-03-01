@@ -260,7 +260,6 @@ class Hatter:
         if len(exceptions) > 0:
             raise RuntimeError("One or more listeners raised an exception.")
 
-    # TODO also need __aenter__ and __aexit__ paradigms if something like FastAPI will manage lifecycle?
     async def run(self, **kwargs):
         """
         Shorthand coroutine which connects, starts listening on all registered coroutines, and blocks while listening. This can be used as
