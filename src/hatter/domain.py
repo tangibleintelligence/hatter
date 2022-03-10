@@ -21,6 +21,7 @@ class RegisteredCoroOrGen(BaseModel):
     queue_name: Optional[str]
     exchange_name: Optional[str]
     concurrency: int
+    autoack: bool = False
 
     @root_validator
     def at_least_one(cls, values):
