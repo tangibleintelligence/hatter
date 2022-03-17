@@ -41,6 +41,13 @@ class _Serde:
                 if not flexible_is_subclass(typ, expected_type):
                     raise ValueError(f"Unexpected object after deserialization: expected {expected_type}, provided {typ}")
 
+            # If typ is a dict, we will have done a "double serialize", need to unwrap that.
+            if typ == dict:
+                # Get the dict to serialized data...
+                dict_to_bytes: Dict[str, bytes] = self._obj_deserializer(obj_bytes)
+                # ...then deser all the values
+                return {k: self.deserialize(v) for k, v in dict_to_bytes.items()}
+
             return self._obj_deserializer(obj_bytes)
         except pickle.UnpicklingError as e:
             # Perhaps it wasn't published using hatter? Try to deserialize directly
