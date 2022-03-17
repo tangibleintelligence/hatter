@@ -34,7 +34,7 @@ class _Serde:
         obj_bytes = self._obj_serializer(obj)
         return pickle.dumps((obj_bytes, type(obj)))
 
-    def deserialize(self, bites: bytes, expected_type: Optional[Type[T]] = None) -> T:
+    def deserialize(self, bites: bytes, expected_type: Optional[Type[T]] = None, chain: bool = False) -> T:
         try:
             obj_bytes, typ = self.deserialize_raw(bites)
             if expected_type is not None:
@@ -42,11 +42,11 @@ class _Serde:
                     raise ValueError(f"Unexpected object after deserialization: expected {expected_type}, provided {typ}")
 
             # If typ is a dict, we will have done a "double serialize", need to unwrap that.
-            if typ == dict:
+            if chain and typ == dict:
                 # Get the dict to serialized data...
                 dict_to_bytes: Dict[str, bytes] = self._obj_deserializer(obj_bytes)
                 # ...then deser all the values
-                return {k: self.deserialize(v) for k, v in dict_to_bytes.items()}
+                return {k: self.deserialize(v, chain=True) for k, v in dict_to_bytes.items()}
 
             return self._obj_deserializer(obj_bytes)
         except pickle.UnpicklingError as e:
@@ -92,7 +92,7 @@ class SerdeRegistry:
         _serde = _Serde(obj_serializer, obj_deserializer)
         self._serdes[typ] = _serde
 
-    def generic_deserialize(self, raw_bytes: bytes) -> T:
+    def generic_deserialize(self, raw_bytes: bytes, chain: bool) -> T:
         """
         Deserializes without knowledge of the type. Not as reliable as finding a specific serde, as type checking is impossible.
         """
@@ -100,7 +100,7 @@ class SerdeRegistry:
         _, typ = _Serde.deserialize_raw(raw_bytes)
 
         # And now deserialize
-        return self[typ].deserialize(raw_bytes)
+        return self[typ].deserialize(raw_bytes, chain=chain)
 
     def _closest_registered_type(self, search_type: Type[T]) -> Optional[Type[T]]:
         """
@@ -166,12 +166,15 @@ class Hatter:
     def register_serde(self, typ: Type[T], serializer: Callable[[T], bytes], deserializer: Callable[[bytes], T]):
         self._serde_registry.register_serde(typ, serializer, deserializer)
 
-    def generic_deserialize(self, raw_message_bytes: bytes) -> T:
+    def generic_deserialize(self, raw_message_bytes: bytes, chain: bool = False) -> T:
         """
         If we don't have a "target" type (i.e. we aren't using hatter to decorate an annotated function) then we need to deserialize
         "generically" based on the type given.
+
+        `chain` indicates whether or not to chain into nested structures (such as dicts) and deserialize inner components as well.
+        This is usually needed when parsing the return value passed back through an RPC queue.
         """
-        return self._serde_registry.generic_deserialize(raw_message_bytes)
+        return self._serde_registry.generic_deserialize(raw_message_bytes, chain)
 
     def listen(
         self, *, queue_name: Optional[str] = None, exchange_name: Optional[str] = None, concurrency: int = 1, autoack: bool = False
@@ -514,7 +517,7 @@ class Hatter:
                 logger.exception("Unreplyable exception", exc_info=exception)
                 logger.exception("Error sending exception back to reply-to queue", exc_info=e_)
         if not autoack:
-            message.nack(requeue=False)
+            await message.nack(requeue=False)
         logger.exception("Exception on message")
 
     async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel):
