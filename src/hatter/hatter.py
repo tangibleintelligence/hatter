@@ -263,6 +263,9 @@ class Hatter:
         """
         Can be used to wait on all running listeners. Will return when any waiting listener has an error
         """
+        if len(self._tasks) == 0:
+            raise RuntimeError("No coroutines found listening")
+
         completed_tasks, _ = await asyncio.wait(self._tasks, return_when=asyncio.FIRST_EXCEPTION)
 
         # Are there exceptions?
@@ -321,7 +324,9 @@ class Hatter:
             else:
                 # Convert the annotation to a type (if possible)
                 ann = param.annotation
-                if isinstance(ann, type):
+                if ann == inspect.Signature.empty:
+                    typ = None
+                elif isinstance(ann, type):
                     typ = ann
                 elif isinstance(get_origin(ann), type):
                     typ = get_origin(ann)

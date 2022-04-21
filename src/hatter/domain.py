@@ -10,7 +10,8 @@ MAX_MESSAGE_PRIORITY = 10
 
 DecoratedCoro = TypeVar("DecoratedCoro", bound=Coroutine[None, None, Any])
 DecoratedGen = TypeVar("DecoratedGen", bound=AsyncGenerator[Any, None])
-DecoratedCoroOrGen = Union[DecoratedCoro, DecoratedGen]
+_DecoratedCoroOrGen = Union[DecoratedCoro, DecoratedGen]
+DecoratedCoroOrGen = Callable[[_DecoratedCoroOrGen], _DecoratedCoroOrGen]
 
 
 class RegisteredCoroOrGen(BaseModel):
