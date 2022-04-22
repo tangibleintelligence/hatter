@@ -1,16 +1,16 @@
 """
 Defines main object which is used to decorate methods
 """
+from logging import getLogger
+
 import asyncio
 import inspect
 import logging
 import pickle
 import warnings
-from logging import getLogger
-from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin
-
 from aio_pika import IncomingMessage, Channel, Message, Queue
 from aiormq import PublishError
+from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin
 
 from hatter.amqp import AMQPManager
 from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
@@ -165,6 +165,12 @@ class Hatter:
 
     def register_serde(self, typ: Type[T], serializer: Callable[[T], bytes], deserializer: Callable[[bytes], T]):
         self._serde_registry.register_serde(typ, serializer, deserializer)
+
+    def serialize(self, obj: Any) -> bytes:
+        """
+        Generically serialize an object. If possible, will use a serde matching the type of the object passed in.
+        """
+        return self._serde_registry[type(obj)].serialize(obj)
 
     def generic_deserialize(self, raw_message_bytes: bytes, chain: bool = False) -> T:
         """
@@ -532,12 +538,12 @@ class Hatter:
 
         if isinstance(msg.data, dict):
             # serialize each dict value using a matching serde...
-            bites_dict: Dict[str, bytes] = {k: self._serde_registry[type(v)].serialize(v) for k, v in msg.data.items()}
+            bites_dict: Dict[str, bytes] = {k: self.serialize(v) for k, v in msg.data.items()}
             # ...then serialize the new str -> bytes dict for transmit
             bites: bytes = self._serde_registry[dict].serialize(bites_dict)
         else:
             # just have to serialize the raw value as needed
-            bites: bytes = self._serde_registry[type(msg.data)].serialize(msg.data)
+            bites: bytes = self.serialize(msg.data)
 
         amqp_message = Message(body=bites, reply_to=msg.reply_to_queue, correlation_id=msg.correlation_id, priority=msg.priority)
         # TODO other fields like ttl
