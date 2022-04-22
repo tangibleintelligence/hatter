@@ -25,7 +25,7 @@ async def create_exchange_queue(
 
     if exchange_name is not None:
         # Named exchanges are always fanout TODO or headers
-        exchange = await consume_channel.declare_exchange(exchange_name, type=ExchangeType.FANOUT, durable=True)
+        exchange = await consume_channel.declare_exchange(exchange_name, type=ExchangeType.FANOUT, auto_delete=True)
     else:
         exchange = None
 

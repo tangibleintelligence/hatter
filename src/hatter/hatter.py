@@ -10,7 +10,7 @@ import pickle
 import warnings
 from aio_pika import IncomingMessage, Channel, Message, Queue
 from aiormq import PublishError
-from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin
+from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin, AsyncIterator
 
 from hatter.amqp import AMQPManager
 from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
@@ -454,6 +454,25 @@ class Hatter:
         """
         await self._publish_hatter_message(msg, self._amqp_manager.publish_channel)
         return msg.correlation_id
+
+    async def adhoc_consume(self, exchange_name: str) -> AsyncIterator[Any]:
+        """
+        By design, this only implements a very simple situation:
+
+        - Infinite consumption from a fanout exchange (with the given name)
+        - Expects single values which are `generic_deserialize`d.
+
+        For more complex situations, this most likely shouldn't be used directly, and instead consider how using hatter decorators and
+        coroutines better suits your situation.
+        """
+        async with await self._amqp_manager.new_channel() as c:
+            # Declare the fanout exchange...
+            ex, queue = await create_exchange_queue(exchange_name, None, c)
+
+            # ... and start listening on a throwaway queue
+            async for message in queue.iterator():
+                message: IncomingMessage
+                yield self.generic_deserialize(message.body, chain=True)
 
     async def create_temporary_queue(self) -> Queue:
         """
