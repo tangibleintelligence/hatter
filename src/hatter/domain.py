@@ -23,6 +23,7 @@ class RegisteredCoroOrGen(BaseModel):
     exchange_name: Optional[str]
     concurrency: int
     autoack: bool = False
+    blocks: bool = False
 
     @root_validator
     def at_least_one(cls, values):

@@ -14,7 +14,7 @@ from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Unio
 
 from hatter.amqp import AMQPManager
 from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
-from hatter.util import get_substitution_names, create_exchange_queue, flexible_is_subclass
+from hatter.util import get_substitution_names, create_exchange_queue, flexible_is_subclass, thread_it
 
 logger = getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -144,7 +144,7 @@ class Hatter:
         rabbitmq_virtual_host: str = "/",
         rabbitmq_port: int = 5672,
         tls: bool = False,
-        heartbeat: Optional[int] = None
+        heartbeat: Optional[int] = None,
     ):
 
         # Init an AMQPManager. Actual connectivity isn't started until __enter__ via a with block.
@@ -184,7 +184,13 @@ class Hatter:
         return self._serde_registry.generic_deserialize(raw_message_bytes, chain)
 
     def listen(
-        self, *, queue_name: Optional[str] = None, exchange_name: Optional[str] = None, concurrency: int = 1, autoack: bool = False
+        self,
+        *,
+        queue_name: Optional[str] = None,
+        exchange_name: Optional[str] = None,
+        concurrency: int = 1,
+        autoack: bool = False,
+        blocks: bool = False,
     ) -> Callable[[Union[DecoratedCoroOrGen]], DecoratedCoroOrGen]:
         """
         Registers decorated coroutine (`async def`) or async generator (`async def` with `yield` instead of return) to run when a message is
@@ -212,7 +218,7 @@ class Hatter:
         def decorator(coro_or_gen: DecoratedCoroOrGen) -> DecoratedCoroOrGen:
             # Register this coroutine/async-generator for later listening
             if inspect.iscoroutinefunction(coro_or_gen) or inspect.isasyncgenfunction(coro_or_gen):
-                self._register_listener(coro_or_gen, queue_name, exchange_name, concurrency, autoack)
+                self._register_listener(coro_or_gen, queue_name, exchange_name, concurrency, autoack, blocks)
                 return coro_or_gen
             else:
                 raise ValueError(
@@ -223,14 +229,25 @@ class Hatter:
         return decorator
 
     def _register_listener(
-        self, coro_or_gen: DecoratedCoroOrGen, queue_name: Optional[str], exchange_name: Optional[str], concurrency: int, autoack: bool
+        self,
+        coro_or_gen: DecoratedCoroOrGen,
+        queue_name: Optional[str],
+        exchange_name: Optional[str],
+        concurrency: int,
+        autoack: bool,
+        blocks: bool,
     ):
         """
         Adds function to registry
         """
         self._registry.append(
             RegisteredCoroOrGen(
-                coro_or_gen=coro_or_gen, queue_name=queue_name, exchange_name=exchange_name, concurrency=concurrency, autoack=autoack
+                coro_or_gen=coro_or_gen,
+                queue_name=queue_name,
+                exchange_name=exchange_name,
+                concurrency=concurrency,
+                autoack=autoack,
+                blocks=blocks,
             )
         )
 
@@ -256,8 +273,7 @@ class Hatter:
         await self._amqp_manager.__aenter__()
 
         for registered_obj in self._registry:
-            consume_channel = await self._amqp_manager.new_channel(prefetch=registered_obj.concurrency)
-            self._tasks.append(asyncio.create_task(self.consume_coro_or_gen(registered_obj, consume_channel, self._run_kwargs)))
+            self._tasks.append(asyncio.create_task(self.consume_coro_or_gen(registered_obj, self._run_kwargs)))
 
         # TODO need a way to monitor for any of these tasks failing and either restart them or abort everything
 
@@ -272,7 +288,6 @@ class Hatter:
         """
         if len(self._tasks) == 0:
             raise RuntimeError("No coroutines found listening")
-
         completed_tasks, _ = await asyncio.wait(self._tasks, return_when=asyncio.FIRST_EXCEPTION)
 
         # Are there exceptions?
@@ -291,12 +306,14 @@ class Hatter:
             logger.info("Hatter connected and listening...")
             await self.wait()
 
-    async def consume_coro_or_gen(self, registered_obj: RegisteredCoroOrGen, consume_channel: Channel, run_kwargs: Dict[str, Any]):
+    async def consume_coro_or_gen(self, registered_obj: RegisteredCoroOrGen, run_kwargs: Dict[str, Any]):
         """
         Sets up prerequisites and begins consuming on the specified queue.
         """
 
         logger.debug(f"Starting consumption for: {str(registered_obj)}")
+
+        consume_channel: Channel = await self._amqp_manager.new_channel(prefetch=registered_obj.concurrency)
 
         ex_name, q_name, resolved_substitutions = await self.build_exchange_queue_names(registered_obj, run_kwargs)
 
@@ -489,13 +506,31 @@ class Hatter:
     async def _process_message(self, message: IncomingMessage, registered_obj: RegisteredCoroOrGen, **callable_kwargs):
         logger.debug(f"Processing message {message.delivery_tag}")
         try:
+            # Do we need to run the actual coro in a separate thread, not just coroutine? We need to run in a separate thread if:
+            # - this particular coroutine is marked as "blocking", meaning a non-trivial amount of cpu bound work will take place that
+            #   could block the whole event loop
+            # Depending on the length of blocking/execution, we might be able to skip this UNLESS more than one message can be handled
+            # by this process, from concurrency > 1 and/or multiple listening coroutines.
+            # (registered_obj.concurrency > 1 or len(self._registry) > 1)
+            # But for now we'll just always do it.
+
             if inspect.iscoroutinefunction(registered_obj.coro_or_gen):
                 # it returns
-                return_val = await registered_obj.coro_or_gen(**callable_kwargs)
+                if registered_obj.blocks:
+                    logger.info(f"Running {registered_obj.coro_or_gen.__name__} in separate thread to prevent blocking.")
+                    _task = thread_it(registered_obj.coro_or_gen(**callable_kwargs))
+                else:
+                    _task = asyncio.create_task(registered_obj.coro_or_gen(**callable_kwargs))
+                return_val = await _task
                 if return_val is not None:
                     await self._handle_return_value(message, return_val)
             else:
                 # it yields
+                if registered_obj.blocks:
+                    warnings.warn(
+                        "Async iterators which block are not currently supported. Running in main event loop; problems may result."
+                    )
+
                 async for v in registered_obj.coro_or_gen(**callable_kwargs):
                     if v is not None:
                         await self._handle_return_value(message, v)
