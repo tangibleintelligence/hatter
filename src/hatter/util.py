@@ -1,12 +1,12 @@
 """
 Helpful stateless utility methods
 """
+import asyncio
 import re
 import warnings
-from typing import Set, Optional, Tuple
-
 from aio_pika import Channel, Exchange, Queue, ExchangeType
 from aiormq import ChannelPreconditionFailed
+from typing import Set, Optional, Tuple, Awaitable, TypeVar
 
 from hatter.domain import MAX_MESSAGE_PRIORITY
 
@@ -74,3 +74,28 @@ def flexible_is_subclass(cls: type, potential_superclass: type) -> bool:
             return True
 
     return False
+
+
+T = TypeVar("T")
+
+
+def thread_it(coro: Awaitable[T]) -> asyncio.Task[T]:
+    """
+    Spins up a secondary loop in another thread, runs the coroutine there, and returns an
+    awaitable which can be waited on in the calling thread.
+
+    Basically can be used in place of `asyncio.create_task` except that passed coroutine will be run in a separate thread, for coroutines
+    which contain non-trivial amounts of blocking code.
+    """
+
+    def _run_coro_in_new_loop():
+        _loop = None
+        try:
+            _loop = asyncio.new_event_loop()
+            return _loop.run_until_complete(coro)
+        finally:
+            if _loop is not None:
+                _loop.stop()
+                _loop.close()
+
+    return asyncio.create_task(asyncio.to_thread(_run_coro_in_new_loop))
