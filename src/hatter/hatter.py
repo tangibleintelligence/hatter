@@ -144,11 +144,12 @@ class Hatter:
         rabbitmq_virtual_host: str = "/",
         rabbitmq_port: int = 5672,
         tls: bool = False,
+        heartbeat: Optional[int] = None
     ):
 
         # Init an AMQPManager. Actual connectivity isn't started until __enter__ via a with block.
         self._amqp_manager: AMQPManager = AMQPManager(
-            rabbitmq_host, rabbitmq_user, rabbitmq_pass, rabbitmq_virtual_host, rabbitmq_port, tls
+            rabbitmq_host, rabbitmq_user, rabbitmq_pass, rabbitmq_virtual_host, rabbitmq_port, tls, heartbeat
         )
 
         # we need a registry of coroutines and/or async generators (to be added via @hatter.listen(...) decorators). Each coroutine or

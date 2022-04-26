@@ -5,6 +5,8 @@ from logging import getLogger
 
 import aio_pika
 from aio_pika import RobustConnection, Channel
+from aio_pika.connection import make_url
+from typing import Optional
 
 # TODO clearcut logging
 logger = getLogger(__name__)
@@ -16,7 +18,14 @@ class AMQPManager:
     """
 
     def __init__(
-        self, rabbitmq_host: str, rabbitmq_user: str, rabbitmq_pass: str, rabbitmq_virtual_host: str, rabbitmq_port: int, tls: bool
+        self,
+        rabbitmq_host: str,
+        rabbitmq_user: str,
+        rabbitmq_pass: str,
+        rabbitmq_virtual_host: str,
+        rabbitmq_port: int,
+        tls: bool,
+        heartbeat: Optional[int],
     ):
         self._rabbitmq_host = rabbitmq_host
         self._rabbitmq_port = rabbitmq_port
@@ -26,17 +35,22 @@ class AMQPManager:
         self._rabbitmq_virtual_host = rabbitmq_virtual_host
         self._connection: RobustConnection = None
         self._publish_channel: Channel = None
+        self._heartbeat = heartbeat or 60
 
     async def __aenter__(self):
         # Create connection based on args passed in init. Channels will be created as needed per queue
-        self._connection = await aio_pika.connect_robust(
+        # Due to but in aio-pika, need to form the url explicitly. We'll still use the function from there though.
+        _url = make_url(
             host=self._rabbitmq_host,
             port=self._rabbitmq_port,
             login=self._rabbitmq_user,
             password=self._rabbitmq_pass,
             virtualhost=self._rabbitmq_virtual_host,
-            ssl=self._tls
+            ssl=self._tls,
+            heartbeat=self._heartbeat,
+            timeout=self._heartbeat // 2,  # This one's the bug bc connect_robust explicitly defines a timeout kwarg which soaks it up
         )
+        self._connection = await aio_pika.connect_robust(_url)
 
         # Create a channel for ad-hoc publishing of messages
         self._publish_channel = await self.new_channel()
