@@ -455,6 +455,10 @@ class Hatter:
         await self._publish_hatter_message(msg, self._amqp_manager.publish_channel)
         return msg.correlation_id
 
+    @property
+    def publish_channel(self) -> Optional[Channel]:
+        return self._amqp_manager.publish_channel
+
     async def adhoc_consume(self, exchange_name: str) -> AsyncIterator[Any]:
         """
         By design, this only implements a very simple situation:
