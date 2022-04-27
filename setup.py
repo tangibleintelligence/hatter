@@ -5,7 +5,7 @@ with open("README.md", encoding="utf-8") as readme:
 
 setup(
     name="hatter",
-    version="0.4.0b10",
+    version="0.4.0b11",
     description="Framework to easily create microservices backed by a RabbitMQ broker",
     long_description=LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
@@ -15,6 +15,7 @@ setup(
     package_dir={"": "src"},
     python_requires=">3.8",
     install_requires=[
-        "aio-pika>=7.1.0,<8", "pydantic>=1.7.3,<2"
+        "aio-pika>=7.1.0,<8",
+        "pydantic>=1.7.3,<2",
     ],
 )
