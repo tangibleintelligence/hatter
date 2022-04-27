@@ -1,6 +1,8 @@
 """
 Helpful stateless utility methods
 """
+import threading
+from clearcut import get_logger
 import asyncio
 import re
 import warnings
@@ -10,6 +12,7 @@ from typing import Set, Optional, Tuple, Awaitable, TypeVar
 
 from hatter.domain import MAX_MESSAGE_PRIORITY
 
+logger = get_logger(__name__)
 
 def get_substitution_names(a_str: str) -> Set[str]:
     """Finds all strings wrapped in {braces} which we expect should/could be substituted in an f-string/`format` call."""
@@ -78,6 +81,8 @@ def flexible_is_subclass(cls: type, potential_superclass: type) -> bool:
 
 T = TypeVar("T")
 
+thread_it_storage: threading.local = threading.local()
+
 
 def thread_it(coro: Awaitable[T]) -> asyncio.Task[T]:
     """
@@ -89,13 +94,15 @@ def thread_it(coro: Awaitable[T]) -> asyncio.Task[T]:
     """
 
     def _run_coro_in_new_loop():
-        _loop = None
-        try:
+        # Init a new loop if necessary
+        if not getattr(thread_it_storage, "loop_created", False):
+            _loop = None
             _loop = asyncio.new_event_loop()
-            return _loop.run_until_complete(coro)
-        finally:
-            if _loop is not None:
-                _loop.stop()
-                _loop.close()
+            logger.debug(f"Setting event loop {_loop} / {id(_loop)} on thread {threading.current_thread().name}")
+            asyncio.set_event_loop(_loop)
+            thread_it_storage.loop_created = True
+        else:
+            _loop = asyncio.get_event_loop()
+        return _loop.run_until_complete(coro)
 
     return asyncio.create_task(asyncio.to_thread(_run_coro_in_new_loop))
