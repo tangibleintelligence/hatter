@@ -517,7 +517,7 @@ class Hatter:
             if inspect.iscoroutinefunction(registered_obj.coro_or_gen):
                 # it returns
                 if registered_obj.blocks:
-                    logger.info(f"Running {registered_obj.coro_or_gen.__name__} in separate thread to prevent blocking.")
+                    logger.debug(f"Running {registered_obj.coro_or_gen.__name__} in separate thread to prevent blocking.")
                     _task = thread_it(registered_obj.coro_or_gen(**callable_kwargs))
                 else:
                     _task = asyncio.create_task(registered_obj.coro_or_gen(**callable_kwargs))
