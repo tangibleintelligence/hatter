@@ -1,10 +1,9 @@
 """
 Data objects
 """
-from typing import Any, TypeVar, Optional, Coroutine, Union, AsyncGenerator, Callable, Dict
-from uuid import uuid4
-
 from pydantic import BaseModel, root_validator, validator, Field
+from typing import Any, TypeVar, Optional, Coroutine, Union, AsyncGenerator, Callable
+from uuid import uuid4
 
 MAX_MESSAGE_PRIORITY = 10
 
@@ -38,7 +37,7 @@ class RegisteredCoroOrGen(BaseModel):
 
 
 class HatterMessage(BaseModel):
-    data: Union[Dict[str, Any], Any]
+    data: Union[Any]
     reply_to_queue: Optional[str]
     correlation_id: Optional[str]
     destination_exchange: Optional[str]
