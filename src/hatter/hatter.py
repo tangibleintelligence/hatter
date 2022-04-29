@@ -613,7 +613,7 @@ class Hatter:
             # Exchange based it is
             exchange = await channel.get_exchange(msg.destination_exchange)
             routing_key = msg.routing_key or ""
-            await exchange.publish(amqp_message, routing_key=routing_key, mandatory=True)  # TODO might need to disable mandatory sometimes?
+            await exchange.publish(amqp_message, routing_key=routing_key, mandatory=False)
         else:
             # Queue based
             await channel.default_exchange.publish(amqp_message, routing_key=msg.destination_queue, mandatory=True)
