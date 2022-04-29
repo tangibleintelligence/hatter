@@ -36,6 +36,7 @@ class AMQPManager:
         self._connection: RobustConnection = None
         self._publish_channel: Channel = None
         self._heartbeat = heartbeat or 60
+        self.listening_coros = []
 
     async def __aenter__(self):
         # Create connection based on args passed in init. Channels will be created as needed per queue
@@ -50,7 +51,7 @@ class AMQPManager:
             heartbeat=self._heartbeat,
             timeout=self._heartbeat // 2,  # This one's the bug bc connect_robust explicitly defines a timeout kwarg which soaks it up
         )
-        self._connection = await aio_pika.connect_robust(_url)
+        self._connection = await aio_pika.connect_robust(_url, client_properties={"listening": self.listening_coros})
 
         # Create a channel for ad-hoc publishing of messages
         self._publish_channel = await self.new_channel()

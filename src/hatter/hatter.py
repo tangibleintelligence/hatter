@@ -270,6 +270,7 @@ class Hatter:
         Connects to RabbitMQ and starts listening on registered queues/coroutines. Does not block. If blocking method is desired, either
         perform a subsequent blocking call within the `async with` block, or use the shorthand `.run(**kwargs)` method.
         """
+        self._amqp_manager.listening_coros = [c.coro_or_gen.__name__ for c in self._registry]
         await self._amqp_manager.__aenter__()
 
         for registered_obj in self._registry:

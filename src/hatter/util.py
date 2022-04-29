@@ -1,22 +1,28 @@
 """
 Helpful stateless utility methods
 """
-import threading
-from clearcut import get_logger
 import asyncio
 import re
+import threading
 import warnings
 from aio_pika import Channel, Exchange, Queue, ExchangeType
 from aiormq import ChannelPreconditionFailed
+from clearcut import get_logger
 from typing import Set, Optional, Tuple, Awaitable, TypeVar
 
 from hatter.domain import MAX_MESSAGE_PRIORITY
 
 logger = get_logger(__name__)
 
+
 def get_substitution_names(a_str: str) -> Set[str]:
     """Finds all strings wrapped in {braces} which we expect should/could be substituted in an f-string/`format` call."""
     return set(re.findall("{(.*?)}", a_str))
+
+
+async def create_exchange(exchange_name: str, consume_channel: Channel) -> Exchange:
+    """Create (if needed) and exchange based on our pre-determined pattern."""
+    return await consume_channel.declare_exchange(exchange_name, type=ExchangeType.FANOUT, auto_delete=True)
 
 
 async def create_exchange_queue(
@@ -28,7 +34,7 @@ async def create_exchange_queue(
 
     if exchange_name is not None:
         # Named exchanges are always fanout TODO or headers
-        exchange = await consume_channel.declare_exchange(exchange_name, type=ExchangeType.FANOUT, auto_delete=True)
+        exchange = await create_exchange(exchange_name, consume_channel)
     else:
         exchange = None
 
