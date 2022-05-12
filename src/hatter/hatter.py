@@ -1,23 +1,22 @@
 """
 Defines main object which is used to decorate methods
 """
-from logging import getLogger
-
 import asyncio
 import inspect
-import logging
 import pickle
 import warnings
-from aio_pika import IncomingMessage, Channel, Message, Queue
-from aiormq import PublishError
 from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin, AsyncIterator
 
+from aio_pika import IncomingMessage, Channel, Message, Queue
+from aiormq import PublishError
+
+from clearcut import context_from_carrier, get_logger_tracer
+from clearcut.otlputils import carrier_from_context
 from hatter.amqp import AMQPManager
 from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
 from hatter.util import get_substitution_names, create_exchange_queue, flexible_is_subclass, thread_it
 
-logger = getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger, tracer = get_logger_tracer(__name__)
 
 T = NewType("T", object)
 
@@ -31,33 +30,35 @@ class _Serde:
 
     # we want to enhance the serde slightly to also record the type itself (needed for generic/unknown deserialization)
     def serialize(self, obj: T) -> bytes:
-        obj_bytes = self._obj_serializer(obj)
-        return pickle.dumps((obj_bytes, type(obj)))
+        with tracer.start_as_current_span("hatter:serialize"):
+            obj_bytes = self._obj_serializer(obj)
+            return pickle.dumps((obj_bytes, type(obj)))
 
     def deserialize(self, bites: bytes, expected_type: Optional[Type[T]] = None, chain: bool = False) -> T:
-        try:
-            obj_bytes, typ = self.deserialize_raw(bites)
-            if expected_type is not None:
-                if not flexible_is_subclass(typ, expected_type):
-                    raise ValueError(f"Unexpected object after deserialization: expected {expected_type}, provided {typ}")
-
-            # If typ is a dict, we will have done a "double serialize", need to unwrap that.
-            if chain and typ == dict:
-                # Get the dict to serialized data...
-                dict_to_bytes: Dict[str, bytes] = self._obj_deserializer(obj_bytes)
-                # ...then deser all the values
-                return {k: self.deserialize(v, chain=True) for k, v in dict_to_bytes.items()}
-
-            return self._obj_deserializer(obj_bytes)
-        except pickle.UnpicklingError as e:
-            # Perhaps it wasn't published using hatter? Try to deserialize directly
+        with tracer.start_as_current_span("hatter:deserialize"):
             try:
-                ret = self._obj_deserializer(bites)
-                warnings.warn("Submitted message was not published with hatter, and type cannot be checked.")
-                logger.debug("Unpickling error:", exc_info=e)
-                return ret
-            except Exception as e:
-                raise ValueError(f"Cannot deserialize bytes. (Starting bytes: [{bites[:-20]}].)", e)
+                obj_bytes, typ = self.deserialize_raw(bites)
+                if expected_type is not None:
+                    if not flexible_is_subclass(typ, expected_type):
+                        raise ValueError(f"Unexpected object after deserialization: expected {expected_type}, provided {typ}")
+
+                # If typ is a dict, we will have done a "double serialize", need to unwrap that.
+                if chain and typ == dict:
+                    # Get the dict to serialized data...
+                    dict_to_bytes: Dict[str, bytes] = self._obj_deserializer(obj_bytes)
+                    # ...then deser all the values
+                    return {k: self.deserialize(v, chain=True) for k, v in dict_to_bytes.items()}
+
+                return self._obj_deserializer(obj_bytes)
+            except pickle.UnpicklingError as e:
+                # Perhaps it wasn't published using hatter? Try to deserialize directly
+                try:
+                    ret = self._obj_deserializer(bites)
+                    warnings.warn("Submitted message was not published with hatter, and type cannot be checked.")
+                    logger.debug("Unpickling error:", exc_info=e)
+                    return ret
+                except Exception as e:
+                    raise ValueError(f"Cannot deserialize bytes. (Starting bytes: [{bites[:-20]}].)", e)
 
     @staticmethod
     def deserialize_raw(raw_bytes: bytes) -> Tuple[bytes, Type[T]]:
@@ -374,50 +375,52 @@ class Hatter:
         async for message in queue.iterator(no_ack=registered_obj.autoack):
             message: IncomingMessage
             try:
-                # Build kwargs from fixed...
-                callable_kwargs = dict()
-                callable_kwargs.update(fixed_callable_kwargs)
+                # Use context on the message headers
+                with context_from_carrier(message.headers):
+                    # Build kwargs from fixed...
+                    callable_kwargs = dict()
+                    callable_kwargs.update(fixed_callable_kwargs)
 
-                # ... dynamic (i.e. based on the message but used for routing/config) ...
-                for kwarg, kwarg_function in dynamic_callable_kwargs.items():
-                    callable_kwargs[kwarg] = kwarg_function(message)
+                    # ... dynamic (i.e. based on the message but used for routing/config) ...
+                    for kwarg, kwarg_function in dynamic_callable_kwargs.items():
+                        callable_kwargs[kwarg] = kwarg_function(message)
 
-                # ... and message body (i.e. based on the message and passed into the function)
-                # Extract the message body
+                    # ... and message body (i.e. based on the message and passed into the function)
+                    # Extract the message body
 
-                data = self.generic_deserialize(message.body)
+                    data = self.generic_deserialize(message.body)
 
-                # If a dict, special handling
-                if isinstance(data, dict):
-                    # The passed dict might be the entire value of a single kwarg function. Check for that...
-                    # single_message_body_kwarg, single_kwarg_function = next(iter(message_body_kwargs.items()))
-                    if (
-                        len(message_body_kwargs) == 1
-                        and (single_message_body_kwarg := next(iter(message_body_kwargs.items()))[0]) not in data
-                    ):
-                        # This means there's one kwarg on the hatter'ed function, _and_ that kwarg name doesn't exist in the dict
-                        # Assume that a dict _was_ the actual single value intended to be passed (and not a mapping from kwarg names
-                        # to values).
-                        callable_kwargs[single_message_body_kwarg] = {k: self.generic_deserialize(v) for k, v in data.items()}
+                    # If a dict, special handling
+                    if isinstance(data, dict):
+                        # The passed dict might be the entire value of a single kwarg function. Check for that...
+                        # single_message_body_kwarg, single_kwarg_function = next(iter(message_body_kwargs.items()))
+                        if (
+                            len(message_body_kwargs) == 1
+                            and (single_message_body_kwarg := next(iter(message_body_kwargs.items()))[0]) not in data
+                        ):
+                            # This means there's one kwarg on the hatter'ed function, _and_ that kwarg name doesn't exist in the dict
+                            # Assume that a dict _was_ the actual single value intended to be passed (and not a mapping from kwarg names
+                            # to values).
+                            callable_kwargs[single_message_body_kwarg] = {k: self.generic_deserialize(v) for k, v in data.items()}
+                        else:
+                            # Assume that the dict keys are function kwargs
+                            for kwarg, kwarg_function in message_body_kwargs.items():
+                                if kwarg in data:
+                                    callable_kwargs[kwarg] = kwarg_function(data[kwarg])
                     else:
-                        # Assume that the dict keys are function kwargs
-                        for kwarg, kwarg_function in message_body_kwargs.items():
-                            if kwarg in data:
-                                callable_kwargs[kwarg] = kwarg_function(data[kwarg])
-                else:
-                    # Better hope that there's only one arg to the function. If there is, pass in the data object to it
-                    if len(message_body_kwargs) == 1:
-                        single_message_body_kwarg, single_kwarg_function = next(iter(message_body_kwargs.items()))
-                        # Use the explicit typed serde instead of generic_deserialize
-                        callable_kwargs[single_message_body_kwarg] = single_kwarg_function(message.body)
-                    else:
-                        raise RuntimeError(
-                            "Decorated coroutine has more than one body argument, but a dictionary was not passed as the message."
-                        )
+                        # Better hope that there's only one arg to the function. If there is, pass in the data object to it
+                        if len(message_body_kwargs) == 1:
+                            single_message_body_kwarg, single_kwarg_function = next(iter(message_body_kwargs.items()))
+                            # Use the explicit typed serde instead of generic_deserialize
+                            callable_kwargs[single_message_body_kwarg] = single_kwarg_function(message.body)
+                        else:
+                            raise RuntimeError(
+                                "Decorated coroutine has more than one body argument, but a dictionary was not passed as the message."
+                            )
 
-                # We call the registered coroutine/generator with these built kwargs
-                # Do this in a coroutine so that other messages can be processed concurrently
-                asyncio.create_task(self._process_message(message, registered_obj, **callable_kwargs))
+                    # We call the registered coroutine/generator with these built kwargs
+                    # Do this in a coroutine so that other messages can be processed concurrently
+                    asyncio.create_task(self._process_message(message, registered_obj, **callable_kwargs))
             except asyncio.CancelledError:
                 # We were told to cancel. nack with requeue so someone else will pick up the work
                 if not registered_obj.autoack:
@@ -515,26 +518,27 @@ class Hatter:
             # (registered_obj.concurrency > 1 or len(self._registry) > 1)
             # But for now we'll just always do it.
 
-            if inspect.iscoroutinefunction(registered_obj.coro_or_gen):
-                # it returns
-                if registered_obj.blocks:
-                    logger.debug(f"Running {registered_obj.coro_or_gen.__name__} in separate thread to prevent blocking.")
-                    _task = thread_it(registered_obj.coro_or_gen(**callable_kwargs))
+            with tracer.start_as_current_span("hatter:run_coro_or_gen"):
+                if inspect.iscoroutinefunction(registered_obj.coro_or_gen):
+                    # it returns
+                    if registered_obj.blocks:
+                        logger.debug(f"Running {registered_obj.coro_or_gen.__name__} in separate thread to prevent blocking.")
+                        _task = thread_it(registered_obj.coro_or_gen(**callable_kwargs))
+                    else:
+                        _task = asyncio.create_task(registered_obj.coro_or_gen(**callable_kwargs))
+                    return_val = await _task
+                    if return_val is not None:
+                        await self._handle_return_value(message, return_val)
                 else:
-                    _task = asyncio.create_task(registered_obj.coro_or_gen(**callable_kwargs))
-                return_val = await _task
-                if return_val is not None:
-                    await self._handle_return_value(message, return_val)
-            else:
-                # it yields
-                if registered_obj.blocks:
-                    warnings.warn(
-                        "Async iterators which block are not currently supported. Running in main event loop; problems may result."
-                    )
+                    # it yields
+                    if registered_obj.blocks:
+                        warnings.warn(
+                            "Async iterators which block are not currently supported. Running in main event loop; problems may result."
+                        )
 
-                async for v in registered_obj.coro_or_gen(**callable_kwargs):
-                    if v is not None:
-                        await self._handle_return_value(message, v)
+                    async for v in registered_obj.coro_or_gen(**callable_kwargs):
+                        if v is not None:
+                            await self._handle_return_value(message, v)
 
             # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
             # TODO consider doing all of this transactionally
@@ -605,7 +609,13 @@ class Hatter:
             # just have to serialize the raw value as needed
             bites: bytes = self.serialize(msg.data)
 
-        amqp_message = Message(body=bites, reply_to=msg.reply_to_queue, correlation_id=msg.correlation_id, priority=msg.priority)
+        amqp_message = Message(
+            body=bites,
+            reply_to=msg.reply_to_queue,
+            correlation_id=msg.correlation_id,
+            priority=msg.priority,
+            headers=carrier_from_context(),
+        )
         # TODO other fields like ttl
 
         # Exchange or queue based?
