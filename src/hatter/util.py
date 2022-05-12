@@ -5,11 +5,12 @@ import asyncio
 import re
 import threading
 import warnings
-from aio_pika import Channel, Exchange, Queue, ExchangeType
-from aiormq import ChannelPreconditionFailed
-from clearcut import get_logger
 from typing import Set, Optional, Tuple, Awaitable, TypeVar
 
+from aio_pika import Channel, Exchange, Queue, ExchangeType
+from aiormq import ChannelPreconditionFailed
+
+from clearcut import get_logger
 from hatter.domain import MAX_MESSAGE_PRIORITY
 
 logger = get_logger(__name__)
@@ -53,7 +54,7 @@ async def create_exchange_queue(
                 raise e
     else:
         # Anonymous queues are transient/temporary
-        queue = await consume_channel.declare_queue(None, durable=False, exclusive=True, auto_delete=False)
+        queue = await consume_channel.declare_queue(None, durable=False, exclusive=False, auto_delete=True)
 
     # If only a queue was passed, we'll use the automatic binding to Rabbit's default '' exchange
     # If an exchange was passed, we need to bind the queue (whether it's temporary or shared) to the given exchange
