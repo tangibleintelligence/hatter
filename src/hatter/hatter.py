@@ -9,6 +9,7 @@ from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Unio
 
 from aio_pika import IncomingMessage, Channel, Message, Queue
 from aiormq import PublishError
+from opentelemetry.trace import SpanKind
 
 from clearcut import context_from_carrier, get_logger_tracer
 from clearcut.otlputils import carrier_from_context
@@ -619,11 +620,12 @@ class Hatter:
         # TODO other fields like ttl
 
         # Exchange or queue based?
-        if msg.destination_exchange is not None:
-            # Exchange based it is
-            exchange = await channel.get_exchange(msg.destination_exchange)
-            routing_key = msg.routing_key or ""
-            await exchange.publish(amqp_message, routing_key=routing_key, mandatory=False)
-        else:
-            # Queue based
-            await channel.default_exchange.publish(amqp_message, routing_key=msg.destination_queue, mandatory=True)
+        with tracer.start_as_current_span('hatter:publish', kind=SpanKind.PRODUCER):
+            if msg.destination_exchange is not None:
+                # Exchange based it is
+                exchange = await channel.get_exchange(msg.destination_exchange)
+                routing_key = msg.routing_key or ""
+                await exchange.publish(amqp_message, routing_key=routing_key, mandatory=False)
+            else:
+                # Queue based
+                await channel.default_exchange.publish(amqp_message, routing_key=msg.destination_queue, mandatory=True)
