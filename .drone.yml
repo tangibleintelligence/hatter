@@ -1,23 +1,11 @@
 ---
 kind: pipeline
 name: build/upload pypi package
+type: docker
+
 steps:
-  - name:  build wheel
-    image: python:3.8
-    commands:
-      - pip install -e .
-      - pip install wheel
-      - python setup.py bdist_wheel
-  - name: upload to pypi
-    when:
-      branch:
-        - master
-        - feature/PD-432
-    image: python:3.8
-    environment:
-      TWINE_USERNAME:       __token__
-      TWINE_PASSWORD:
+  - name:  build and publish poetry project
+    image: austin1howard/drone-plugin-poetry:latest
+    settings:
+      pypi_token:
         from_secret: pypi_token
-    commands:
-      - pip install twine
-      - twine upload dist/*

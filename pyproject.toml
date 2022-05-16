@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "hatter"
+version = "0.5.0b1"
+description = "Framework to easily create microservices backed by a RabbitMQ broker"
+authors = ["Austin Howard <austin@tangibleintelligence.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/tangibleintelligence/hatter"
+repository = "https://github.com/tangibleintelligence/hatter"
+keywords = [
+    "RabbitMQ",
+    "Message Broker",
+    "Distributed Computing"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+]
+
+[tool.poetry.dependencies]
+python = "^3.6"
+aio-pika = "^7.1.0"
+pydantic = "^1.8.2"
+clearcut = "^0.2.0"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
