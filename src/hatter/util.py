@@ -58,7 +58,7 @@ async def create_exchange_queue(
     else:
         # Anonymous queues are transient/temporary. Autodelete+ttl them.
         queue = await consume_channel.declare_queue(
-            None, durable=False, exclusive=False, auto_delete=True, arguments={"x-expires": 1000 * 10}
+            None, durable=False, exclusive=False, auto_delete=True, arguments={"x-expires": 1000 * 60}
         )
 
     # If only a queue was passed, we'll use the automatic binding to Rabbit's default '' exchange
