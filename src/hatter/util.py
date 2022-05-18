@@ -154,11 +154,6 @@ def main_loop(
 
     if inspect.iscoroutine(coro):
 
-        # double check that the module level loop is on the main thread
-        # noinspection PyUnresolvedReferences,PyProtectedMember
-        tid = _main_thread_event_loop._thread_id
-        assert tid == threading.main_thread().ident
-
         async def _run_coro_in_main_loop():
             fut: concurrent.futures.Future = asyncio.run_coroutine_threadsafe(coro, _main_thread_event_loop)
 
