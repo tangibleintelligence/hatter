@@ -5,11 +5,10 @@ import asyncio
 import inspect
 import pickle
 import warnings
-from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin, AsyncIterator
-
 from aio_pika import IncomingMessage, Channel, Message, Queue
 from aiormq import PublishError
 from opentelemetry.trace import SpanKind
+from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin, AsyncIterator
 
 from clearcut import context_from_carrier, get_logger_tracer
 from clearcut.otlputils import carrier_from_context
@@ -278,10 +277,9 @@ class Hatter:
         for registered_obj in self._registry:
             self._tasks.append(asyncio.create_task(self.consume_coro_or_gen(registered_obj, self._run_kwargs)))
 
-        # TODO need a way to monitor for any of these tasks failing and either restart them or abort everything
-
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         for task in self._tasks:
+            logger.info(f"Cancelling task {task}")
             task.cancel()
         await self._amqp_manager.__aexit__(exc_type, exc_val, exc_tb)
 
@@ -374,6 +372,7 @@ class Hatter:
 
         # Consume from this queue, forever
         async for message in queue.iterator(no_ack=registered_obj.autoack):
+            logger.debug("Got a message")
             message: IncomingMessage
             try:
                 # Use context on the message headers
@@ -430,6 +429,8 @@ class Hatter:
                 raise
             except Exception as e:
                 await self._handle_message_exception(message, e, registered_obj.autoack)
+
+            logger.debug("Listening again")
 
     @staticmethod
     async def build_exchange_queue_names(registered_obj, run_kwargs):
@@ -620,7 +621,7 @@ class Hatter:
         # TODO other fields like ttl
 
         # Exchange or queue based?
-        with tracer.start_as_current_span('hatter:publish', kind=SpanKind.PRODUCER):
+        with tracer.start_as_current_span("hatter:publish", kind=SpanKind.PRODUCER):
             if msg.destination_exchange is not None:
                 # Exchange based it is
                 exchange = await channel.get_exchange(msg.destination_exchange)
