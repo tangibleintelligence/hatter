@@ -529,8 +529,7 @@ class Hatter:
                     else:
                         _task = asyncio.create_task(registered_obj.coro_or_gen(**callable_kwargs))
                     return_val = await _task
-                    if return_val is not None:
-                        await self._handle_return_value(message, return_val)
+                    await self._handle_return_value(message, return_val)
                 else:
                     # it yields
                     if registered_obj.blocks:
@@ -539,8 +538,7 @@ class Hatter:
                         )
 
                     async for v in registered_obj.coro_or_gen(**callable_kwargs):
-                        if v is not None:
-                            await self._handle_return_value(message, v)
+                        await self._handle_return_value(message, v)
 
             # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
             # TODO consider doing all of this transactionally
@@ -578,7 +576,7 @@ class Hatter:
                         logger.info(f"Return value was exception:", exc_info=return_val)
                     else:
                         logger.info(f"Return value was: {return_val}")
-            else:
+            elif return_val is not None:
                 warnings.warn(
                     f"Decorated coroutine/generator returned/yielded a {type(return_val)} value, but incoming message did not contain a "
                     f"'reply_to' queue (i.e., RPC pattern)."
