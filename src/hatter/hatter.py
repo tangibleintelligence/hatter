@@ -144,13 +144,14 @@ class Hatter:
         rabbitmq_pass: str,
         rabbitmq_virtual_host: str = "/",
         rabbitmq_port: int = 5672,
+        rabbitmq_rest_port: int = 15672,
         tls: bool = False,
         heartbeat: Optional[int] = None,
     ):
 
         # Init an AMQPManager. Actual connectivity isn't started until __enter__ via a with block.
         self._amqp_manager: AMQPManager = AMQPManager(
-            rabbitmq_host, rabbitmq_user, rabbitmq_pass, rabbitmq_virtual_host, rabbitmq_port, tls, heartbeat
+            rabbitmq_host, rabbitmq_user, rabbitmq_pass, rabbitmq_virtual_host, rabbitmq_port, rabbitmq_rest_port, tls, heartbeat
         )
 
         # we need a registry of coroutines and/or async generators (to be added via @hatter.listen(...) decorators). Each coroutine or
@@ -375,6 +376,25 @@ class Hatter:
             logger.debug("Got a message")
             message: IncomingMessage
             try:
+                if message.reply_to is not None and registered_obj.blocks:
+                    # Check if response queue exists still. We use "blocks=True" as a limit as those are generally the slower functions.
+                    # Because non-existent queues trigger a channel close, we use the REST api to query instead.
+                    resp = await self._amqp_manager.rest_client_session.get(f"/api/queues/{self._amqp_manager.vhost}/{message.reply_to}")
+                    if resp.status == 200:
+                        # all good, proceed.
+                        pass
+                    elif resp.status == 404:
+                        logger.info(f"Skipping message {message.message_id} as reply-to queue is non-existent.")
+                        if not registered_obj.autoack:
+                            await message.nack(requeue=False)
+                        continue
+                    elif resp.status in (401, 403):
+                        logger.warning(
+                            f"Unable to validate reply-to queue...user {self._amqp_manager.rest_client_session.auth.login} "
+                            f"should have the `management` tag set."
+                        )
+                        pass
+
                 # Use context on the message headers
                 with context_from_carrier(message.headers):
                     # Build kwargs from fixed...

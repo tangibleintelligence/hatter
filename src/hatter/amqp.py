@@ -4,6 +4,8 @@ Object to manage RabbitMQ connection/channels/threads via aio-pika
 from logging import getLogger
 
 import aio_pika
+import aiohttp
+import yarl
 from aio_pika import RobustConnection, Channel
 from aio_pika.connection import make_url
 from typing import Optional
@@ -24,11 +26,13 @@ class AMQPManager:
         rabbitmq_pass: str,
         rabbitmq_virtual_host: str,
         rabbitmq_port: int,
+        rabbitmq_rest_port: int,
         tls: bool,
         heartbeat: Optional[int],
     ):
         self._rabbitmq_host = rabbitmq_host
         self._rabbitmq_port = rabbitmq_port
+        self._rabbitmq_rest_port = rabbitmq_rest_port
         self._rabbitmq_user = rabbitmq_user
         self._rabbitmq_pass = rabbitmq_pass
         self._tls = tls
@@ -37,6 +41,10 @@ class AMQPManager:
         self._publish_channel: Channel = None
         self._heartbeat = heartbeat or 60
         self.listening_coros = []
+
+        # Also create an aiohttp client session for calls to REST api
+        _rest_api_base = yarl.URL.build(scheme="http", host=self._rabbitmq_host, port=self._rabbitmq_rest_port)
+        self._rest_client_session = aiohttp.ClientSession(_rest_api_base, auth=aiohttp.BasicAuth(self._rabbitmq_user, self._rabbitmq_pass))
 
     async def __aenter__(self):
         # Create connection based on args passed in init. Channels will be created as needed per queue
@@ -62,6 +70,8 @@ class AMQPManager:
             await self._publish_channel.close()
         if self._connection is not None:
             await self._connection.close()
+        if self._rest_client_session is not None:
+            await self._rest_client_session.close()
 
     async def new_channel(self, prefetch=1, on_return_raises=True):
         channel = await self._connection.channel(on_return_raises=on_return_raises)
@@ -71,3 +81,11 @@ class AMQPManager:
     @property
     def publish_channel(self):
         return self._publish_channel
+
+    @property
+    def rest_client_session(self) -> aiohttp.ClientSession:
+        return self._rest_client_session
+
+    @property
+    def vhost(self):
+        return self._rabbitmq_virtual_host
