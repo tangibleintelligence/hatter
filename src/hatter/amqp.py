@@ -6,7 +6,7 @@ from logging import getLogger
 import aio_pika
 import aiohttp
 import yarl
-from aio_pika import RobustConnection, Channel
+from aio_pika import Channel, Connection
 from aio_pika.connection import make_url
 from typing import Optional
 
@@ -37,7 +37,7 @@ class AMQPManager:
         self._rabbitmq_pass = rabbitmq_pass
         self._tls = tls
         self._rabbitmq_virtual_host = rabbitmq_virtual_host
-        self._connection: RobustConnection = None
+        self._connection: Connection = None
         self._publish_channel: Channel = None
         self._heartbeat = heartbeat or 60
         self.listening_coros = []
@@ -48,7 +48,7 @@ class AMQPManager:
 
     async def __aenter__(self):
         # Create connection based on args passed in init. Channels will be created as needed per queue
-        # Due to but in aio-pika, need to form the url explicitly. We'll still use the function from there though.
+        # Due to bug in aio-pika, need to form the url explicitly. We'll still use the function from there though.
         _url = make_url(
             host=self._rabbitmq_host,
             port=self._rabbitmq_port,
@@ -59,7 +59,7 @@ class AMQPManager:
             heartbeat=self._heartbeat,
             timeout=self._heartbeat // 2,  # This one's the bug bc connect_robust explicitly defines a timeout kwarg which soaks it up
         )
-        self._connection = await aio_pika.connect_robust(_url, client_properties={"listening": self.listening_coros})
+        self._connection = await aio_pika.connect(_url, client_properties={"listening": self.listening_coros})
 
         # Create a channel for ad-hoc publishing of messages
         self._publish_channel = await self.new_channel()
