@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "hatter"
-version = "0.5.5b1"
+version = "0.6.0b1"
 description = "Framework to easily create microservices backed by a RabbitMQ broker"
 authors = ["Austin Howard <austin@tangibleintelligence.com>"]
 license = "MIT"
@@ -17,10 +17,10 @@ classifiers = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.6"
-aio-pika = "^7.1.0"
+python = "^3.8"
+aio-pika = "^8.0.3"
 pydantic = "^1.8.2"
-clearcut = "^0.2.0"
+clearcut = "^0.2.2.post0"
 
 [tool.poetry.dev-dependencies]
 
