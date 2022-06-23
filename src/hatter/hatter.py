@@ -11,7 +11,7 @@ from opentelemetry.trace import SpanKind
 from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin, AsyncIterator
 
 from clearcut import context_from_carrier, get_logger_tracer
-from clearcut.otlputils import carrier_from_context
+from clearcut.otlputils import carrier_from_context, add_event
 from hatter.amqp import AMQPManager
 from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
 from hatter.util import get_substitution_names, create_exchange_queue, flexible_is_subclass, thread_it
@@ -397,6 +397,7 @@ class Hatter:
 
                 # Use context on the message headers
                 with context_from_carrier(message.headers):
+                    add_event("message received")
                     # Build kwargs from fixed...
                     callable_kwargs = dict()
                     callable_kwargs.update(fixed_callable_kwargs)
