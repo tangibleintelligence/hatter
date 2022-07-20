@@ -95,7 +95,11 @@ T = TypeVar("T")
 
 thread_it_storage: threading.local = threading.local()
 
-_main_thread_event_loop = asyncio.get_event_loop()
+try:
+    _main_thread_event_loop = asyncio.get_event_loop()
+except RuntimeError:
+    warnings.warn("Unable to identify a main thread event loop. thread_it and main_loop behavior may be unexpected.")
+    _main_thread_event_loop = None
 
 
 def thread_it(
@@ -155,7 +159,12 @@ def main_loop(
     if inspect.iscoroutine(coro):
 
         async def _run_coro_in_main_loop():
-            fut: concurrent.futures.Future = asyncio.run_coroutine_threadsafe(coro, _main_thread_event_loop)
+            if _main_thread_event_loop is None:
+                warnings.warn("Using current loop, may not be main thread event loop.")
+                loop = asyncio.get_event_loop()
+            else:
+                loop = _main_thread_event_loop
+            fut: concurrent.futures.Future = asyncio.run_coroutine_threadsafe(coro, loop)
 
             # Convert the concurrent.futures.Future into an asyncio.Future (why this isn't already the response I have no idea)
             asyncio_fut: asyncio.Future = asyncio.wrap_future(fut)
