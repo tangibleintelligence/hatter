@@ -1,9 +1,10 @@
 """
 Data objects
 """
-from pydantic import BaseModel, root_validator, validator, Field
-from typing import Any, TypeVar, Optional, Coroutine, Union, AsyncGenerator, Callable
+from typing import Any, AsyncGenerator, Callable, Coroutine, Optional, TypeVar, Union
 from uuid import uuid4
+
+from pydantic import BaseModel, Field, root_validator, validator
 
 MAX_MESSAGE_PRIORITY = 10
 
@@ -23,6 +24,7 @@ class RegisteredCoroOrGen(BaseModel):
     concurrency: int
     autoack: bool = False
     blocks: bool = False
+    always_check_rpc_exists: bool = False
 
     @root_validator
     def at_least_one(cls, values):

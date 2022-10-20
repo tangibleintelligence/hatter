@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "hatter"
-version = "0.6.0b3"
+version = "0.6.0b4"
 description = "Framework to easily create microservices backed by a RabbitMQ broker"
 authors = ["Austin Howard <austin@tangibleintelligence.com>"]
 license = "MIT"

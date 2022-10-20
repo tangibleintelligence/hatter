@@ -5,16 +5,17 @@ import asyncio
 import inspect
 import pickle
 import warnings
-from aio_pika import IncomingMessage, Channel, Message, Queue
-from aiormq import PublishError
-from opentelemetry.trace import SpanKind
-from typing import Callable, List, Optional, Set, Dict, NewType, Type, Any, Union, Tuple, get_origin, AsyncIterator
+from typing import Any, AsyncIterator, Callable, Dict, List, NewType, Optional, Set, Tuple, Type, Union, get_origin
 
+from aio_pika import Channel, IncomingMessage, Message, Queue
+from aiormq import PublishError
 from clearcut import context_from_carrier, get_logger_tracer
-from clearcut.otlputils import carrier_from_context, add_event
+from clearcut.otlputils import add_event, carrier_from_context
+from opentelemetry.trace import SpanKind
+
 from hatter.amqp import AMQPManager
-from hatter.domain import DecoratedCoroOrGen, RegisteredCoroOrGen, HatterMessage
-from hatter.util import get_substitution_names, create_exchange_queue, flexible_is_subclass, thread_it
+from hatter.domain import DecoratedCoroOrGen, HatterMessage, RegisteredCoroOrGen
+from hatter.util import create_exchange_queue, flexible_is_subclass, get_substitution_names, thread_it
 
 logger, tracer = get_logger_tracer(__name__)
 
@@ -193,6 +194,7 @@ class Hatter:
         concurrency: int = 1,
         autoack: bool = False,
         blocks: bool = False,
+        always_check_rpc_exists: bool = False,
     ) -> Callable[[Union[DecoratedCoroOrGen]], DecoratedCoroOrGen]:
         """
         Registers decorated coroutine (`async def`) or async generator (`async def` with `yield` instead of return) to run when a message is
@@ -220,7 +222,7 @@ class Hatter:
         def decorator(coro_or_gen: DecoratedCoroOrGen) -> DecoratedCoroOrGen:
             # Register this coroutine/async-generator for later listening
             if inspect.iscoroutinefunction(coro_or_gen) or inspect.isasyncgenfunction(coro_or_gen):
-                self._register_listener(coro_or_gen, queue_name, exchange_name, concurrency, autoack, blocks)
+                self._register_listener(coro_or_gen, queue_name, exchange_name, concurrency, autoack, blocks, always_check_rpc_exists)
                 return coro_or_gen
             else:
                 raise ValueError(
@@ -238,6 +240,7 @@ class Hatter:
         concurrency: int,
         autoack: bool,
         blocks: bool,
+        always_check_rpc_exists: bool,
     ):
         """
         Adds function to registry
@@ -250,6 +253,7 @@ class Hatter:
                 concurrency=concurrency,
                 autoack=autoack,
                 blocks=blocks,
+                always_check_rpc_exists=always_check_rpc_exists,
             )
         )
 
@@ -376,7 +380,7 @@ class Hatter:
             logger.debug("Got a message")
             message: IncomingMessage
             try:
-                if message.reply_to is not None and registered_obj.blocks:
+                if registered_obj.always_check_rpc_exists or (message.reply_to is not None and registered_obj.blocks):
                     # Check if response queue exists still. We use "blocks=True" as a limit as those are generally the slower functions.
                     # Because non-existent queues trigger a channel close, we use the REST api to query instead.
                     resp = await self._amqp_manager.rest_client_session.get(f"/api/queues/{self._amqp_manager.vhost}/{message.reply_to}")
