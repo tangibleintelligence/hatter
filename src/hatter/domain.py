@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field, root_validator, validator
 
 MAX_MESSAGE_PRIORITY = 10
 
+GENERATOR_RESPONSE_INDEX_HEADER = "generator_response_index"
+
 DecoratedCoro = TypeVar("DecoratedCoro", bound=Coroutine[None, None, Any])
 DecoratedGen = TypeVar("DecoratedGen", bound=AsyncGenerator[Any, None])
 _DecoratedCoroOrGen = Union[DecoratedCoro, DecoratedGen]
@@ -50,6 +52,7 @@ class HatterMessage(BaseModel):
     Larger values for priority are considered higher priority. By default, messages will be treated with priority 0, but can be
     overridden to be between 1 and 10, inclusive. Messages of the same priority are handled in a FIFO manner.
     """
+    generator_response_index: Optional[int] = None
     # TODO headers ttl etc
 
     @validator("correlation_id", always=True)

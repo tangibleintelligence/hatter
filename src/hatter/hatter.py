@@ -14,7 +14,7 @@ from clearcut.otlputils import add_event, carrier_from_context
 from opentelemetry.trace import SpanKind
 
 from hatter.amqp import AMQPManager
-from hatter.domain import DecoratedCoroOrGen, HatterMessage, RegisteredCoroOrGen
+from hatter.domain import GENERATOR_RESPONSE_INDEX_HEADER, DecoratedCoroOrGen, HatterMessage, RegisteredCoroOrGen
 from hatter.util import create_exchange_queue, flexible_is_subclass, get_substitution_names, thread_it
 
 logger, tracer = get_logger_tracer(__name__)
@@ -453,7 +453,7 @@ class Hatter:
                 logger.info("Cancellation requested during message task instantiation.")
                 raise
             except Exception as e:
-                await self._handle_message_exception(message, e, registered_obj.autoack)
+                await self._handle_message_exception(message, e, not registered_obj.autoack)
 
             logger.debug("Listening again")
 
@@ -562,8 +562,20 @@ class Hatter:
                             "Async iterators which block are not currently supported. Running in main event loop; problems may result."
                         )
 
+                    gen_response_index = 0
                     async for v in registered_obj.coro_or_gen(**callable_kwargs):
-                        await self._handle_return_value(message, v)
+                        await self._handle_return_value(message, v, gen_response_index)
+                        gen_response_index += 1
+
+                    # Send over a StopIteration to tell the listener that we're done
+                    await self.publish(
+                        HatterMessage(
+                            data=StopAsyncIteration(),
+                            destination_queue=message.reply_to,
+                            correlation_id=message.correlation_id,
+                            generator_response_index=gen_response_index,
+                        )
+                    )
 
             # At this point, we're processed the message and sent along new ones successfully. We can ack the original message
             # TODO consider doing all of this transactionally
@@ -576,9 +588,9 @@ class Hatter:
             logger.info("Cancellation requested.")
             raise
         except Exception as e_:
-            await self._handle_message_exception(message, e_, registered_obj.autoack)
+            await self._handle_message_exception(message, e_, not registered_obj.autoack)
 
-    async def _handle_return_value(self, triggering_message: Message, return_val: Any):
+    async def _handle_return_value(self, triggering_message: Message, return_val: Any, generator_response_index: Optional[int] = None):
         if isinstance(return_val, HatterMessage):
             try:
                 logger.debug(f"Publishing {return_val}")
@@ -591,7 +603,10 @@ class Hatter:
             if triggering_message.reply_to is not None:
                 # box it into a HatterMessage
                 rpc_reply = HatterMessage(
-                    data=return_val, destination_queue=triggering_message.reply_to, correlation_id=triggering_message.correlation_id
+                    data=return_val,
+                    destination_queue=triggering_message.reply_to,
+                    correlation_id=triggering_message.correlation_id,
+                    generator_response_index=generator_response_index,
                 )
                 try:
                     await self.publish(rpc_reply)
@@ -607,7 +622,7 @@ class Hatter:
                     f"'reply_to' queue (i.e., RPC pattern)."
                 )
 
-    async def _handle_message_exception(self, message, exception, autoack):
+    async def _handle_message_exception(self, message, exception, nack: bool):
         # Send exception to reply-to queue, if applicable
         # TODO impl more properly. Consider exception type when deciding to requeue. Send to exception handling exchange
         if message.reply_to is not None:
@@ -616,9 +631,9 @@ class Hatter:
             except Exception as e_:
                 logger.exception("Unreplyable exception", exc_info=exception)
                 logger.exception("Error sending exception back to reply-to queue", exc_info=e_)
-        if not autoack:
+        if nack:
             await message.nack(requeue=False)
-        logger.exception("Exception on message")
+        logger.exception("Exception on message", exc_info=exception)
 
     async def _publish_hatter_message(self, msg: HatterMessage, channel: Channel):
         """Intelligently publishes the given message on the given channel"""
@@ -634,12 +649,17 @@ class Hatter:
             # just have to serialize the raw value as needed
             bites: bytes = self.serialize(msg.data)
 
+        headers = carrier_from_context()
+        # Add the gen index if provided
+        if msg.generator_response_index is not None:
+            headers[GENERATOR_RESPONSE_INDEX_HEADER] = msg.generator_response_index
+
         amqp_message = Message(
             body=bites,
             reply_to=msg.reply_to_queue,
             correlation_id=msg.correlation_id,
             priority=msg.priority,
-            headers=carrier_from_context(),
+            headers=headers,
         )
         # TODO other fields like ttl
 
